@@ -237,6 +237,10 @@ def main() -> int:
     reset_parser.add_argument("-f", "--force", action="store_true", help="Skip confirmation")
     reset_parser.set_defaults(func=cmd_reset)
 
+    # help
+    help_parser = subparsers.add_parser("help", help="Show this help message")
+    help_parser.set_defaults(func=lambda _: parser.print_help() or 0)
+
     args = parser.parse_args()
 
     setup_logging(args.verbose)
