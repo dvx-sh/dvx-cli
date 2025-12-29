@@ -1,0 +1,15 @@
+#!/bin/bash
+# dvx - Development Orchestrator
+# Entry point script that runs the CLI
+
+DVX_HOME="${HOME}/.dvx"
+PYTHON="${DVX_HOME}/.venv/bin/python"
+
+# Check if venv exists
+if [ ! -f "$PYTHON" ]; then
+    echo "Error: dvx not set up. Run: ${DVX_HOME}/bin/setup"
+    exit 1
+fi
+
+# Run the CLI
+exec "$PYTHON" "${DVX_HOME}/src/cli.py" "$@"

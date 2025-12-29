@@ -1,0 +1,43 @@
+[project]
+name = "dvx"
+version = "0.1.0"
+description = "Development orchestrator for automated implement/review/commit cycles"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+]
+# Add as needed
+automation = [
+    "invoke",
+    "fabric",
+]
+ai = [
+    "anthropic",
+]
+
+[project.scripts]
+dvx = "cli:main"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["cli", "orchestrator", "claude_session", "plan_parser", "state"]
+package-dir = {"" = "src"}
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

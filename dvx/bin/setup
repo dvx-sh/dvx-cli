@@ -1,0 +1,67 @@
+#!/bin/bash
+# dvx setup script
+# Creates the Python virtual environment and installs dvx
+
+set -e
+
+DVX_HOME="${HOME}/.dvx"
+VENV_DIR="${DVX_HOME}/.venv"
+
+echo "Setting up dvx..."
+echo
+
+# Check for Python 3
+if ! command -v python3 &> /dev/null; then
+    echo "Error: python3 not found. Please install Python 3.10+."
+    exit 1
+fi
+
+PYTHON_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+echo "Found Python ${PYTHON_VERSION}"
+
+# Create virtual environment
+if [ -d "$VENV_DIR" ]; then
+    echo "Virtual environment already exists at ${VENV_DIR}"
+else
+    echo "Creating virtual environment..."
+    python3 -m venv "$VENV_DIR"
+fi
+
+# Activate and upgrade pip
+echo "Upgrading pip..."
+"${VENV_DIR}/bin/pip" install --upgrade pip -q
+
+# Install dvx in editable mode
+echo "Installing dvx..."
+cd "$DVX_HOME"
+"${VENV_DIR}/bin/pip" install -e . -q
+
+# Install dev dependencies if requested
+if [ "$1" = "--dev" ]; then
+    echo "Installing dev dependencies..."
+    "${VENV_DIR}/bin/pip" install -e ".[dev]" -q
+fi
+
+echo
+echo "Setup complete!"
+echo
+echo "To use dvx, add this to your shell profile (~/.bashrc, ~/.zshrc, etc.):"
+echo
+echo "    export PATH=\"\${HOME}/.dvx/bin:\$PATH\""
+echo
+echo "Then reload your shell or run:"
+echo
+echo "    source ~/.bashrc  # or ~/.zshrc"
+echo
+echo "To install optional dependencies later:"
+echo "    cd ~/.dvx && source .venv/bin/activate"
+echo "    pip install -e \".[dev]\"       # pytest, ruff"
+echo "    pip install -e \".[automation]\" # invoke, fabric"
+echo "    pip install -e \".[ai]\"         # anthropic"
+echo
+echo "Usage:"
+echo "    dvx start PLAN-feature.md   # Start processing a plan"
+echo "    dvx status                   # Check current status"
+echo "    dvx continue                 # Resume after human input"
+echo "    dvx decisions                # Review decisions made"
+echo
