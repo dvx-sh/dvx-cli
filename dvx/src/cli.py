@@ -167,14 +167,34 @@ CRITICAL: Output ONLY the raw markdown plan. Start immediately with "# Plan:" - 
     return 0
 
 
+class VerboseLogFilter(logging.Filter):
+    """Filter to exclude verbose internal logs from console output.
+
+    These logs go to the file handler but not the console, keeping
+    CLI output clean and focused on orchestrator progress.
+    """
+
+    # Modules whose logs should only go to file, not console
+    FILE_ONLY_MODULES = {"claude_session", "plan_parser"}
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.name not in self.FILE_ONLY_MODULES
+
+
 def setup_logging(verbose: bool = False, plan_file: Optional[str] = None) -> None:
     level = logging.DEBUG if verbose else logging.INFO
     format_str = "%(asctime)s [%(levelname)s] %(message)s" if verbose else "%(message)s"
 
+    # Console handler - filtered to exclude verbose internal logs
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(level)
+    console_handler.setFormatter(logging.Formatter(format_str))
+    if not verbose:
+        console_handler.addFilter(VerboseLogFilter())
+
     logging.basicConfig(
         level=level,
-        format=format_str,
-        handlers=[logging.StreamHandler()],
+        handlers=[console_handler],
     )
 
     # Set up file logging in plan-specific or root .dvx directory
@@ -185,6 +205,7 @@ def setup_logging(verbose: bool = False, plan_file: Optional[str] = None) -> Non
         dvx_dir = get_dvx_root()
         dvx_dir.mkdir(exist_ok=True)
 
+    # File handler - gets ALL logs including claude_session
     log_file = dvx_dir / "dvx.log"
     file_handler = logging.FileHandler(log_file)
     file_handler.setLevel(logging.DEBUG)
