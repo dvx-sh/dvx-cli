@@ -1,7 +1,8 @@
 """
 State management for dvx orchestrator.
 
-Manages the .dvx/ directory in each project for tracking orchestration state.
+Manages the .dvx/{plan}/ directory structure for tracking orchestration state.
+Supports multiple concurrent plans in the same project.
 """
 
 import json
@@ -19,6 +20,11 @@ DVX_DIR = ".dvx"
 STATE_FILE = "state.json"
 BLOCKED_FILE = "blocked-context.md"
 LOG_FILE = "dvx.log"
+
+
+def get_plan_dir_name(plan_file: str) -> str:
+    """Get the directory name for a plan file (just the filename, no path)."""
+    return Path(plan_file).name
 
 
 class Phase(Enum):
@@ -55,28 +61,46 @@ class State:
         return cls(**data)
 
 
-def get_dvx_dir(project_dir: Optional[str] = None) -> Path:
-    """Get the .dvx directory for a project."""
+def get_dvx_root(project_dir: Optional[str] = None) -> Path:
+    """Get the root .dvx directory for a project."""
     project_dir = Path(project_dir or os.getcwd())
     return project_dir / DVX_DIR
 
 
-def ensure_dvx_dir(project_dir: Optional[str] = None) -> Path:
-    """Ensure .dvx directory exists and return its path."""
-    dvx_dir = get_dvx_dir(project_dir)
-    dvx_dir.mkdir(exist_ok=True)
+def get_dvx_dir(plan_file: Optional[str] = None, project_dir: Optional[str] = None) -> Path:
+    """
+    Get the .dvx directory for a plan.
 
-    # Create .gitignore if it doesn't exist
-    gitignore = dvx_dir / ".gitignore"
+    If plan_file is provided, returns .dvx/{plan_file}/
+    Otherwise returns the root .dvx/ directory.
+    """
+    root = get_dvx_root(project_dir)
+    if plan_file:
+        return root / get_plan_dir_name(plan_file)
+    return root
+
+
+def ensure_dvx_dir(plan_file: Optional[str] = None, project_dir: Optional[str] = None) -> Path:
+    """Ensure .dvx directory (and plan subdirectory if specified) exists."""
+    root = get_dvx_root(project_dir)
+    root.mkdir(exist_ok=True)
+
+    # Create .gitignore in root if it doesn't exist
+    gitignore = root / ".gitignore"
     if not gitignore.exists():
         gitignore.write_text("# Ignore all dvx working files\n*\n!.gitignore\n")
 
-    return dvx_dir
+    if plan_file:
+        plan_dir = root / get_plan_dir_name(plan_file)
+        plan_dir.mkdir(exist_ok=True)
+        return plan_dir
+
+    return root
 
 
-def load_state(project_dir: Optional[str] = None) -> Optional[State]:
-    """Load state from .dvx/state.json."""
-    dvx_dir = get_dvx_dir(project_dir)
+def load_state(plan_file: str, project_dir: Optional[str] = None) -> Optional[State]:
+    """Load state from .dvx/{plan}/state.json."""
+    dvx_dir = get_dvx_dir(plan_file, project_dir)
     state_file = dvx_dir / STATE_FILE
 
     if not state_file.exists():
@@ -91,8 +115,8 @@ def load_state(project_dir: Optional[str] = None) -> Optional[State]:
 
 
 def save_state(state: State, project_dir: Optional[str] = None) -> None:
-    """Save state to .dvx/state.json."""
-    dvx_dir = ensure_dvx_dir(project_dir)
+    """Save state to .dvx/{plan}/state.json."""
+    dvx_dir = ensure_dvx_dir(state.plan_file, project_dir)
     state_file = dvx_dir / STATE_FILE
 
     state.updated_at = datetime.now().isoformat()
@@ -100,9 +124,9 @@ def save_state(state: State, project_dir: Optional[str] = None) -> None:
     logger.debug(f"Saved state to {state_file}")
 
 
-def reset_state(project_dir: Optional[str] = None) -> None:
+def reset_state(plan_file: str, project_dir: Optional[str] = None) -> None:
     """Remove state file to reset."""
-    dvx_dir = get_dvx_dir(project_dir)
+    dvx_dir = get_dvx_dir(plan_file, project_dir)
     state_file = dvx_dir / STATE_FILE
 
     if state_file.exists():
@@ -121,22 +145,22 @@ def create_initial_state(plan_file: str, project_dir: Optional[str] = None) -> S
     return state
 
 
-def update_phase(phase: Phase, project_dir: Optional[str] = None) -> State:
+def update_phase(phase: Phase, plan_file: str, project_dir: Optional[str] = None) -> State:
     """Update the current phase."""
-    state = load_state(project_dir)
+    state = load_state(plan_file, project_dir)
     if state is None:
-        raise RuntimeError("No active state - run 'dvx start' first")
+        raise RuntimeError("No active state - run 'dvx run <plan>' first")
 
     state.phase = phase.value
     save_state(state, project_dir)
     return state
 
 
-def set_current_task(task_id: str, task_title: str, project_dir: Optional[str] = None) -> State:
+def set_current_task(task_id: str, task_title: str, plan_file: str, project_dir: Optional[str] = None) -> State:
     """Set the current task being worked on."""
-    state = load_state(project_dir)
+    state = load_state(plan_file, project_dir)
     if state is None:
-        raise RuntimeError("No active state - run 'dvx start' first")
+        raise RuntimeError("No active state - run 'dvx run <plan>' first")
 
     state.current_task_id = task_id
     state.current_task_title = task_title
@@ -145,15 +169,15 @@ def set_current_task(task_id: str, task_title: str, project_dir: Optional[str] =
     return state
 
 
-def increment_iteration(project_dir: Optional[str] = None) -> tuple[State, bool]:
+def increment_iteration(plan_file: str, project_dir: Optional[str] = None) -> tuple[State, bool]:
     """
     Increment iteration count and check if max reached.
 
     Returns: (state, exceeded_max)
     """
-    state = load_state(project_dir)
+    state = load_state(plan_file, project_dir)
     if state is None:
-        raise RuntimeError("No active state - run 'dvx start' first")
+        raise RuntimeError("No active state - run 'dvx run <plan>' first")
 
     state.iteration_count += 1
     exceeded = state.iteration_count > state.max_iterations
@@ -161,24 +185,21 @@ def increment_iteration(project_dir: Optional[str] = None) -> tuple[State, bool]
     return state, exceeded
 
 
-def set_overseer_session(session_id: str, project_dir: Optional[str] = None) -> State:
+def set_overseer_session(session_id: str, plan_file: str, project_dir: Optional[str] = None) -> State:
     """Store the overseer session ID for resumption."""
-    state = load_state(project_dir)
+    state = load_state(plan_file, project_dir)
     if state is None:
-        raise RuntimeError("No active state - run 'dvx start' first")
+        raise RuntimeError("No active state - run 'dvx run <plan>' first")
 
     state.overseer_session_id = session_id
     save_state(state, project_dir)
     return state
 
 
-def write_blocked_context(reason: str, context: str, session_id: Optional[str] = None, plan_file: Optional[str] = None, project_dir: Optional[str] = None) -> Path:
+def write_blocked_context(reason: str, context: str, plan_file: str, session_id: Optional[str] = None, project_dir: Optional[str] = None) -> Path:
     """Write blocked context file for human review."""
-    dvx_dir = ensure_dvx_dir(project_dir)
+    dvx_dir = ensure_dvx_dir(plan_file, project_dir)
     blocked_file = dvx_dir / BLOCKED_FILE
-
-    # Use the plan file name for the run command
-    plan_name = plan_file or "PLAN.md"
 
     content = f"""# Blocked: {reason}
 
@@ -191,7 +212,7 @@ def write_blocked_context(reason: str, context: str, session_id: Optional[str] =
 
 ## Instructions
 
-Run `dvx run {plan_name}` and when resolved type `/exit` - dvx will continue.
+Run `dvx run {plan_file}` and when resolved type `/exit` - dvx will continue.
 
 """
     blocked_file.write_text(content)
@@ -199,27 +220,27 @@ Run `dvx run {plan_name}` and when resolved type `/exit` - dvx will continue.
     return blocked_file
 
 
-def clear_blocked(project_dir: Optional[str] = None) -> None:
+def clear_blocked(plan_file: str, project_dir: Optional[str] = None) -> None:
     """Clear the blocked state and file."""
-    dvx_dir = get_dvx_dir(project_dir)
+    dvx_dir = get_dvx_dir(plan_file, project_dir)
     blocked_file = dvx_dir / BLOCKED_FILE
 
     if blocked_file.exists():
         blocked_file.unlink()
 
-    state = load_state(project_dir)
+    state = load_state(plan_file, project_dir)
     if state and state.phase == Phase.BLOCKED.value:
         state.phase = Phase.IDLE.value
         save_state(state, project_dir)
 
 
-def log_decision(topic: str, decision: str, reasoning: str, alternatives: list[str], project_dir: Optional[str] = None) -> None:
+def log_decision(topic: str, decision: str, reasoning: str, alternatives: list[str], plan_file: str, project_dir: Optional[str] = None) -> None:
     """
     Log a decision to DECISIONS-{topic}.md.
 
     These are decisions made by Claude that the user should review.
     """
-    dvx_dir = ensure_dvx_dir(project_dir)
+    dvx_dir = ensure_dvx_dir(plan_file, project_dir)
     decision_file = dvx_dir / f"DECISIONS-{topic}.md"
 
     # Append to existing or create new
@@ -249,9 +270,9 @@ def log_decision(topic: str, decision: str, reasoning: str, alternatives: list[s
     logger.info(f"Logged decision to {decision_file}")
 
 
-def get_decisions(project_dir: Optional[str] = None) -> list[Path]:
-    """Get all decision files in .dvx/."""
-    dvx_dir = get_dvx_dir(project_dir)
+def get_decisions(plan_file: str, project_dir: Optional[str] = None) -> list[Path]:
+    """Get all decision files in .dvx/{plan}/."""
+    dvx_dir = get_dvx_dir(plan_file, project_dir)
     if not dvx_dir.exists():
         return []
 

@@ -15,6 +15,7 @@ from state import (
     ensure_dvx_dir,
     get_decisions,
     get_dvx_dir,
+    get_dvx_root,
     increment_iteration,
     load_state,
     log_decision,
@@ -25,6 +26,9 @@ from state import (
     update_phase,
     write_blocked_context,
 )
+
+# Test plan file used for all tests
+TEST_PLAN = "PLAN-test.md"
 
 
 class TestState:
@@ -82,27 +86,34 @@ class TestStateManagement:
     def setup_method(self):
         """Create a temp directory for each test."""
         self.temp_dir = tempfile.mkdtemp()
+        self.plan_file = TEST_PLAN
 
     def teardown_method(self):
         """Clean up temp directory."""
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def test_get_dvx_dir(self):
-        """get_dvx_dir should return .dvx path."""
-        dvx_dir = get_dvx_dir(self.temp_dir)
-        assert dvx_dir == Path(self.temp_dir) / ".dvx"
+        """get_dvx_dir should return .dvx/{plan} path when plan provided."""
+        dvx_dir = get_dvx_dir(self.plan_file, self.temp_dir)
+        assert dvx_dir == Path(self.temp_dir) / ".dvx" / self.plan_file
+
+        # Without plan_file, should return root .dvx
+        root_dir = get_dvx_root(self.temp_dir)
+        assert root_dir == Path(self.temp_dir) / ".dvx"
 
     def test_ensure_dvx_dir_creates_directory(self):
-        """ensure_dvx_dir should create .dvx directory."""
-        dvx_dir = ensure_dvx_dir(self.temp_dir)
+        """ensure_dvx_dir should create .dvx and plan subdirectory."""
+        dvx_dir = ensure_dvx_dir(self.plan_file, self.temp_dir)
 
         assert dvx_dir.exists()
         assert dvx_dir.is_dir()
+        assert dvx_dir.name == self.plan_file
 
     def test_ensure_dvx_dir_creates_gitignore(self):
-        """ensure_dvx_dir should create .gitignore."""
-        dvx_dir = ensure_dvx_dir(self.temp_dir)
-        gitignore = dvx_dir / ".gitignore"
+        """ensure_dvx_dir should create .gitignore in root."""
+        ensure_dvx_dir(self.plan_file, self.temp_dir)
+        root = get_dvx_root(self.temp_dir)
+        gitignore = root / ".gitignore"
 
         assert gitignore.exists()
         content = gitignore.read_text()
@@ -110,59 +121,59 @@ class TestStateManagement:
 
     def test_load_state_returns_none_when_no_state(self):
         """load_state should return None when no state file."""
-        state = load_state(self.temp_dir)
+        state = load_state(self.plan_file, self.temp_dir)
         assert state is None
 
     def test_save_and_load_state(self):
         """save_state and load_state should round-trip."""
-        original = State(plan_file="PLAN-test.md", phase="implementing")
+        original = State(plan_file=self.plan_file, phase="implementing")
         save_state(original, self.temp_dir)
 
-        loaded = load_state(self.temp_dir)
+        loaded = load_state(self.plan_file, self.temp_dir)
 
         assert loaded is not None
-        assert loaded.plan_file == "PLAN-test.md"
+        assert loaded.plan_file == self.plan_file
         assert loaded.phase == "implementing"
         assert loaded.updated_at is not None
 
     def test_reset_state(self):
         """reset_state should remove state file."""
-        state = State(plan_file="PLAN.md")
+        state = State(plan_file=self.plan_file)
         save_state(state, self.temp_dir)
 
-        reset_state(self.temp_dir)
+        reset_state(self.plan_file, self.temp_dir)
 
-        assert load_state(self.temp_dir) is None
+        assert load_state(self.plan_file, self.temp_dir) is None
 
     def test_create_initial_state(self):
         """create_initial_state should create and save state."""
-        state = create_initial_state("PLAN-new.md", self.temp_dir)
+        state = create_initial_state(self.plan_file, self.temp_dir)
 
-        assert state.plan_file == "PLAN-new.md"
+        assert state.plan_file == self.plan_file
         assert state.phase == "idle"
         assert state.started_at is not None
 
         # Should be saved
-        loaded = load_state(self.temp_dir)
+        loaded = load_state(self.plan_file, self.temp_dir)
         assert loaded is not None
-        assert loaded.plan_file == "PLAN-new.md"
+        assert loaded.plan_file == self.plan_file
 
     def test_update_phase(self):
         """update_phase should update and save phase."""
-        create_initial_state("PLAN.md", self.temp_dir)
+        create_initial_state(self.plan_file, self.temp_dir)
 
-        state = update_phase(Phase.IMPLEMENTING, self.temp_dir)
+        state = update_phase(Phase.IMPLEMENTING, self.plan_file, self.temp_dir)
 
         assert state.phase == "implementing"
 
-        loaded = load_state(self.temp_dir)
+        loaded = load_state(self.plan_file, self.temp_dir)
         assert loaded.phase == "implementing"
 
     def test_set_current_task(self):
         """set_current_task should update task info."""
-        create_initial_state("PLAN.md", self.temp_dir)
+        create_initial_state(self.plan_file, self.temp_dir)
 
-        state = set_current_task("1.1", "Implement feature", self.temp_dir)
+        state = set_current_task("1.1", "Implement feature", self.plan_file, self.temp_dir)
 
         assert state.current_task_id == "1.1"
         assert state.current_task_title == "Implement feature"
@@ -170,29 +181,29 @@ class TestStateManagement:
 
     def test_increment_iteration(self):
         """increment_iteration should increment and check max."""
-        create_initial_state("PLAN.md", self.temp_dir)
+        create_initial_state(self.plan_file, self.temp_dir)
 
-        state, exceeded = increment_iteration(self.temp_dir)
+        state, exceeded = increment_iteration(self.plan_file, self.temp_dir)
         assert state.iteration_count == 1
         assert exceeded is False
 
-        state, exceeded = increment_iteration(self.temp_dir)
+        state, exceeded = increment_iteration(self.plan_file, self.temp_dir)
         assert state.iteration_count == 2
         assert exceeded is False
 
-        state, exceeded = increment_iteration(self.temp_dir)
+        state, exceeded = increment_iteration(self.plan_file, self.temp_dir)
         assert state.iteration_count == 3
         assert exceeded is False
 
-        state, exceeded = increment_iteration(self.temp_dir)
+        state, exceeded = increment_iteration(self.plan_file, self.temp_dir)
         assert state.iteration_count == 4
         assert exceeded is True  # max_iterations is 3
 
     def test_set_overseer_session(self):
         """set_overseer_session should store session ID."""
-        create_initial_state("PLAN.md", self.temp_dir)
+        create_initial_state(self.plan_file, self.temp_dir)
 
-        state = set_overseer_session("session-abc-123", self.temp_dir)
+        state = set_overseer_session("session-abc-123", self.plan_file, self.temp_dir)
 
         assert state.overseer_session_id == "session-abc-123"
 
@@ -201,8 +212,8 @@ class TestStateManagement:
         blocked_file = write_blocked_context(
             reason="Need API key",
             context="Cannot access external service",
+            plan_file=self.plan_file,
             session_id="abc-123",
-            plan_file="PLAN-test.md",
             project_dir=self.temp_dir
         )
 
@@ -214,18 +225,18 @@ class TestStateManagement:
 
     def test_clear_blocked(self):
         """clear_blocked should remove file and reset phase."""
-        create_initial_state("PLAN.md", self.temp_dir)
-        update_phase(Phase.BLOCKED, self.temp_dir)
-        write_blocked_context("test", "context", project_dir=self.temp_dir)
+        create_initial_state(self.plan_file, self.temp_dir)
+        update_phase(Phase.BLOCKED, self.plan_file, self.temp_dir)
+        write_blocked_context("test", "context", self.plan_file, project_dir=self.temp_dir)
 
-        clear_blocked(self.temp_dir)
+        clear_blocked(self.plan_file, self.temp_dir)
 
         # File should be gone
-        dvx_dir = get_dvx_dir(self.temp_dir)
+        dvx_dir = get_dvx_dir(self.plan_file, self.temp_dir)
         assert not (dvx_dir / "blocked-context.md").exists()
 
         # Phase should be reset
-        state = load_state(self.temp_dir)
+        state = load_state(self.plan_file, self.temp_dir)
         assert state.phase == "idle"
 
     def test_log_decision_creates_file(self):
@@ -235,10 +246,11 @@ class TestStateManagement:
             decision="Use PostgreSQL",
             reasoning="Better JSON support",
             alternatives=["MySQL", "SQLite"],
+            plan_file=self.plan_file,
             project_dir=self.temp_dir
         )
 
-        dvx_dir = get_dvx_dir(self.temp_dir)
+        dvx_dir = get_dvx_dir(self.plan_file, self.temp_dir)
         decision_file = dvx_dir / "DECISIONS-database.md"
 
         assert decision_file.exists()
@@ -249,10 +261,10 @@ class TestStateManagement:
 
     def test_log_decision_appends(self):
         """log_decision should append to existing file."""
-        log_decision("test", "First", "Reason 1", ["A"], self.temp_dir)
-        log_decision("test", "Second", "Reason 2", ["B"], self.temp_dir)
+        log_decision("test", "First", "Reason 1", ["A"], self.plan_file, self.temp_dir)
+        log_decision("test", "Second", "Reason 2", ["B"], self.plan_file, self.temp_dir)
 
-        dvx_dir = get_dvx_dir(self.temp_dir)
+        dvx_dir = get_dvx_dir(self.plan_file, self.temp_dir)
         decision_file = dvx_dir / "DECISIONS-test.md"
         content = decision_file.read_text()
 
@@ -261,10 +273,10 @@ class TestStateManagement:
 
     def test_get_decisions(self):
         """get_decisions should return all decision files."""
-        log_decision("topic1", "D1", "R1", [], self.temp_dir)
-        log_decision("topic2", "D2", "R2", [], self.temp_dir)
+        log_decision("topic1", "D1", "R1", [], self.plan_file, self.temp_dir)
+        log_decision("topic2", "D2", "R2", [], self.plan_file, self.temp_dir)
 
-        decisions = get_decisions(self.temp_dir)
+        decisions = get_decisions(self.plan_file, self.temp_dir)
 
         assert len(decisions) == 2
         names = [d.name for d in decisions]
@@ -273,5 +285,5 @@ class TestStateManagement:
 
     def test_get_decisions_empty(self):
         """get_decisions should return empty list when no decisions."""
-        decisions = get_decisions(self.temp_dir)
+        decisions = get_decisions(self.plan_file, self.temp_dir)
         assert decisions == []

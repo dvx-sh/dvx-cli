@@ -68,7 +68,7 @@ def parse_decisions(output: str) -> list[dict]:
     return decisions
 
 
-def log_decisions_from_output(output: str) -> None:
+def log_decisions_from_output(output: str, plan_file: str) -> None:
     """Parse and log any decisions from Claude's output."""
     decisions = parse_decisions(output)
     for d in decisions:
@@ -77,6 +77,7 @@ def log_decisions_from_output(output: str) -> None:
             decision=d['decision'],
             reasoning=d['reasoning'],
             alternatives=d['alternatives'],
+            plan_file=plan_file,
         )
         logger.info(f"Logged decision: {d['topic']}")
 
@@ -324,7 +325,7 @@ def evaluate_trigger(
         print("  Escalater decided to proceed.")
         logger.info(f"Escalater proceeding: {trigger_reason}")
         # Log the escalater's decision
-        log_decisions_from_output(result.output)
+        log_decisions_from_output(result.output, state.plan_file)
         return True, None
 
     # Escalater decided to escalate to human
@@ -345,12 +346,18 @@ def run_implementor_commit(task: Task, plan_file: str) -> SessionResult:
 
 Please:
 1. Update the plan file ({plan_file}) to mark task {task.id} as complete (change [ ] to [x])
-2. Stage ONLY your changes (not other sessions' work if any)
+2. Stage ONLY files you modified for this task
 3. Create a commit with a meaningful message explaining why these changes were made
 
-Remember:
-- Only commit files you modified for this task
-- The plan file should be included in the commit
+IMPORTANT - Multiple sessions may be running in this project:
+- Other dvx sessions may be working on different plans concurrently
+- Only commit files that YOU modified for THIS task
+- Do NOT stage or commit files from other sessions' work
+- Use `git status` to verify you're only committing your changes
+- If you see changes you didn't make, leave them unstaged
+
+Commit guidelines:
+- The plan file ({plan_file}) should be included in the commit
 - Use a descriptive commit message focused on the "why" not the "what"
 """
 
@@ -369,10 +376,10 @@ def handle_blocked(state: State, reason: str, context: str, session_id: Optional
     """
     logger.warning(f"Blocked: {reason}")
 
-    update_phase(Phase.BLOCKED)
+    update_phase(Phase.BLOCKED, state.plan_file)
     # Use provided session_id, fall back to overseer session
     session_id = session_id or state.overseer_session_id
-    blocked_file = write_blocked_context(reason, context, session_id=session_id, plan_file=state.plan_file)
+    blocked_file = write_blocked_context(reason, context, state.plan_file, session_id=session_id)
 
     print()
     print("=" * 60)
@@ -417,17 +424,12 @@ def run_orchestrator(plan_file: str, step_mode: bool = False) -> int:
 
 def _run_orchestrator_inner(plan_file: str, step_mode: bool = False) -> int:
     """Inner orchestration loop (wrapped by run_orchestrator for error handling)."""
-    # Ensure .dvx directory exists
-    ensure_dvx_dir()
+    # Ensure .dvx directory exists for this plan
+    ensure_dvx_dir(plan_file)
 
     # Load or create state
-    state = load_state()
+    state = load_state(plan_file)
     if state is None:
-        state = create_initial_state(plan_file)
-        state.step_mode = step_mode
-        save_state(state)
-    elif state.plan_file != plan_file:
-        logger.warning(f"Switching from {state.plan_file} to {plan_file}")
         state = create_initial_state(plan_file)
         state.step_mode = step_mode
         save_state(state)
@@ -455,14 +457,14 @@ def _run_orchestrator_inner(plan_file: str, step_mode: bool = False) -> int:
                 print("  - Review any decisions in .dvx/DECISIONS-*.md")
                 print("  - Remove the plan file if no longer needed")
                 print()
-                update_phase(Phase.COMPLETE)
+                update_phase(Phase.COMPLETE, plan_file)
                 return 0
             else:
                 logger.warning("No pending tasks but plan not complete - check for blocked tasks")
                 return 1
 
         # Set current task
-        set_current_task(task.id, task.title)
+        set_current_task(task.id, task.title, plan_file)
         update_task_status(plan_file, task.id, TaskStatus.IN_PROGRESS)
 
         print()
@@ -470,13 +472,13 @@ def _run_orchestrator_inner(plan_file: str, step_mode: bool = False) -> int:
         print("-" * 60)
 
         # === IMPLEMENTATION PHASE ===
-        update_phase(Phase.IMPLEMENTING)
+        update_phase(Phase.IMPLEMENTING, plan_file)
         logger.info(f"Implementing task {task.id}")
 
         impl_result = run_implementor(task, plan_file)
 
         # Log any decisions made during implementation
-        log_decisions_from_output(impl_result.output)
+        log_decisions_from_output(impl_result.output, plan_file)
 
         if not impl_result.success or impl_result.blocked:
             reason = impl_result.block_reason or ("Implementation failed" if not impl_result.success else "Implementor is blocked")
@@ -489,7 +491,7 @@ def _run_orchestrator_inner(plan_file: str, step_mode: bool = False) -> int:
             # Escalater decided to proceed - continue to review
 
         # === REVIEW PHASE ===
-        update_phase(Phase.REVIEWING)
+        update_phase(Phase.REVIEWING, plan_file)
         logger.info("Reviewing implementation...")
 
         review_result, session_id = run_reviewer(
@@ -499,7 +501,7 @@ def _run_orchestrator_inner(plan_file: str, step_mode: bool = False) -> int:
         )
 
         if session_id:
-            set_overseer_session(session_id)
+            set_overseer_session(session_id, plan_file)
 
         if not review_result.success:
             should_continue, exit_code = evaluate_trigger(
@@ -516,7 +518,7 @@ def _run_orchestrator_inner(plan_file: str, step_mode: bool = False) -> int:
         iteration = 0
         while review['has_issues'] and not review['approved']:
             iteration += 1
-            state, exceeded = increment_iteration()
+            state, exceeded = increment_iteration(plan_file)
 
             if exceeded:
                 should_continue, exit_code = evaluate_trigger(
@@ -541,13 +543,13 @@ def _run_orchestrator_inner(plan_file: str, step_mode: bool = False) -> int:
                 # Escalater decided critical issue is not blocking - continue
 
             print(f"  Review iteration {iteration}: addressing feedback...")
-            update_phase(Phase.FIXING)
+            update_phase(Phase.FIXING, plan_file)
 
             # Run implementor with feedback
             impl_result = run_implementor(task, plan_file, feedback=review['suggestions'])
 
             # Log any decisions made during fix
-            log_decisions_from_output(impl_result.output)
+            log_decisions_from_output(impl_result.output, plan_file)
 
             if not impl_result.success or impl_result.blocked:
                 reason = impl_result.block_reason or "Fix implementation failed"
@@ -560,7 +562,7 @@ def _run_orchestrator_inner(plan_file: str, step_mode: bool = False) -> int:
                 # Escalater decided to proceed - continue to re-review
 
             # Re-review
-            update_phase(Phase.REVIEWING)
+            update_phase(Phase.REVIEWING, plan_file)
             review_result, session_id = run_reviewer(
                 plan_file,
                 task,
@@ -568,14 +570,14 @@ def _run_orchestrator_inner(plan_file: str, step_mode: bool = False) -> int:
             )
 
             if session_id:
-                set_overseer_session(session_id)
+                set_overseer_session(session_id, plan_file)
 
             review = parse_review_result(review_result.output)
 
         # === TEST PHASE ===
         if review['missing_tests']:
             print("  Adding missing tests...")
-            update_phase(Phase.TESTING)
+            update_phase(Phase.TESTING, plan_file)
 
             test_prompt = f"""The reviewer noted that tests are missing for task {task.id} ({task.title}).
 
@@ -600,7 +602,7 @@ Run the tests after writing them to ensure they pass.
 
         # === COMMIT PHASE ===
         print("  Committing changes...")
-        update_phase(Phase.COMMITTING)
+        update_phase(Phase.COMMITTING, plan_file)
 
         commit_result = run_implementor_commit(task, plan_file)
 
@@ -619,7 +621,7 @@ Run the tests after writing them to ensure they pass.
         print(f"  Task {task.id} complete!")
 
         # Reset iteration count for next task
-        state = load_state()
+        state = load_state(plan_file)
         state.iteration_count = 0
         save_state(state)
 
@@ -633,7 +635,7 @@ Run the tests after writing them to ensure they pass.
             print()
             print("Review the changes, then run 'dvx continue' for next task.")
             print()
-            update_phase(Phase.PAUSED)
+            update_phase(Phase.PAUSED, plan_file)
             return 0  # Exit cleanly to allow review
 
         # Continue to next task...
