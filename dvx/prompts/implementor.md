@@ -14,18 +14,29 @@ You are implementing task {task_id} from the plan file {plan_file}.
 
 2. **Read relevant existing code** before making changes. Understand the patterns and architecture already in place.
 
-3. **Implement the task**:
+3. **Check if task is already complete**: Before implementing, verify whether this task has already been implemented in the codebase. Look for:
+   - The specific files, functions, or features described in the task
+   - Tests that cover the functionality
+   - Any evidence the work was done (e.g., by a previous session or manual work)
+
+   **If the task is already complete**:
+   - Update the plan file to mark this task as done (change `[ ]` to `[x]` or equivalent)
+   - Output `[ALREADY_COMPLETE]` and briefly explain what you found
+   - Do NOT re-implement or modify the existing implementation
+   - Stop here - do not proceed to implementation
+
+4. **Implement the task** (only if not already complete):
    - Follow existing code patterns and conventions
    - Write clean, well-structured code
    - Include appropriate error handling
    - Add tests for new functionality (this is required, not optional)
 
-4. **When making decisions**:
+5. **When making decisions**:
    - If there's a clear recommended approach, take it and note your decision
    - If the decision is significant, write a brief note explaining your choice
    - Only block (output [BLOCKED: reason]) if there's a truly critical question with no clear answer
 
-5. **After implementation**:
+6. **After implementation**:
    - Run any relevant tests to ensure your changes work
    - Do NOT commit yet - that will happen after review
 

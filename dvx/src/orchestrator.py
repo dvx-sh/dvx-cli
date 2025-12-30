@@ -284,6 +284,16 @@ def parse_escalation_result(output: str) -> dict:
     }
 
 
+def is_already_complete(output: str) -> bool:
+    """
+    Check if implementor found the task was already complete.
+
+    The implementor outputs [ALREADY_COMPLETE] when it detects the task
+    has already been implemented in the codebase.
+    """
+    return "[already_complete]" in output.lower()
+
+
 def get_branch_info() -> tuple[str, str]:
     """
     Get current branch and base branch (main or master).
@@ -796,6 +806,20 @@ def _run_orchestrator_inner(plan_file: str, step_mode: bool = False) -> int:
 
         # Log any decisions made during implementation
         log_decisions_from_output(impl_result.output, plan_file)
+
+        # Check if task was already complete (short-circuit)
+        if is_already_complete(impl_result.output):
+            print(f"  Task {task.id} already complete - skipping to next task")
+            logger.info(f"Task {task.id} detected as already complete")
+            update_task_status(plan_file, task.id, TaskStatus.DONE)
+
+            # Reset iteration count for next task
+            state = load_state(plan_file)
+            state.iteration_count = 0
+            save_state(state)
+
+            # Continue to next task (skip review/fix/test/commit)
+            continue
 
         if not impl_result.success or impl_result.blocked:
             reason = impl_result.block_reason or ("Implementation failed" if not impl_result.success else "Implementor is blocked")

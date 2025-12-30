@@ -6,6 +6,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from orchestrator import (
+    is_already_complete,
     parse_decisions,
     parse_escalation_result,
     parse_finalizer_result,
@@ -366,3 +367,38 @@ Fix these before merge.
         assert len(result["issues"]) == 2
         assert "Security vulnerability" in result["issues"][0]
         assert "Performance" in result["issues"][1]
+
+
+class TestIsAlreadyComplete:
+    """Tests for is_already_complete detection."""
+
+    def test_already_complete_marker(self):
+        """[ALREADY_COMPLETE] marker should be detected."""
+        assert is_already_complete("[ALREADY_COMPLETE] Task was already implemented.")
+
+    def test_already_complete_case_insensitive(self):
+        """Detection should be case insensitive."""
+        assert is_already_complete("[already_complete] Done.")
+        assert is_already_complete("[Already_Complete] Done.")
+        assert is_already_complete("[ALREADY_COMPLETE] Done.")
+
+    def test_already_complete_in_longer_output(self):
+        """Should detect marker in longer output."""
+        output = """
+I checked the codebase and found that this task has already been implemented.
+
+The migration file exists at migrations/001_add_phase.sql and includes:
+- The 'phase' column with DEFAULT 'relationships'
+- The 'datasource_id' column
+
+[ALREADY_COMPLETE]
+
+The plan file has been updated to mark this task as done.
+"""
+        assert is_already_complete(output)
+
+    def test_no_marker(self):
+        """Should return False when marker is not present."""
+        assert not is_already_complete("Task implemented successfully.")
+        assert not is_already_complete("[APPROVED] Looks good.")
+        assert not is_already_complete("Already done with implementation.")

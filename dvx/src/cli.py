@@ -15,7 +15,12 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from claude_session import launch_interactive, run_claude
 from orchestrator import run_orchestrator
-from plan_parser import get_next_pending_task, get_plan_summary
+from plan_parser import (
+    clear_status_for_plan,
+    get_next_pending_task,
+    get_plan_summary,
+    sync_plan_state,
+)
 from state import (
     Phase,
     clear_blocked,
@@ -250,6 +255,15 @@ def cmd_run(args) -> int:
         print(f"Error: Plan file not found: {plan_file}")
         return 1
 
+    # === PLANNER: Sync state with plan file ===
+    # This ensures the status tracking file matches the plan's [x] markers.
+    # Handles cases where: user manually updated plan, escalator completed tasks,
+    # or dvx clean was run but status file wasn't properly cleared.
+    print(f"Syncing plan state: {plan_file}")
+    sync_result = sync_plan_state(plan_file)
+    if sync_result['synced'] > 0 or sync_result['added'] > 0:
+        print(f"  Updated: {sync_result['synced']} synced, {sync_result['added']} added from plan markers")
+
     state = load_state(plan_file)
     step_mode = args.step
 
@@ -395,27 +409,40 @@ def cmd_decisions(args) -> int:
 
 
 def cmd_clean(args) -> int:
-    """Delete .dvx/ directory or plan-specific subdirectory."""
+    """Delete .dvx/ directory or plan-specific subdirectory and clear related state."""
     import shutil
+
+    from plan_parser import clear_cache, clear_status
 
     plan_file = args.plan_file if hasattr(args, 'plan_file') and args.plan_file else None
 
     if plan_file:
         # Clean specific plan
         dvx_dir = get_dvx_dir(plan_file)
-        if not dvx_dir.exists():
+        if dvx_dir.exists():
+            shutil.rmtree(dvx_dir)
+            print(f"Removed {dvx_dir}")
+        else:
             print(f"No state directory for: {plan_file}")
-            return 0
-        shutil.rmtree(dvx_dir)
-        print(f"Removed {dvx_dir}")
+
+        # Also clear status and cache for this plan
+        # This ensures a clean restart when running again
+        if Path(plan_file).exists():
+            clear_status_for_plan(plan_file)
+            print(f"Cleared task statuses for: {plan_file}")
     else:
         # Clean entire .dvx directory
         dvx_dir = get_dvx_root()
-        if not dvx_dir.exists():
+        if dvx_dir.exists():
+            shutil.rmtree(dvx_dir)
+            print(f"Removed {dvx_dir}")
+        else:
             print("No .dvx/ directory to clean.")
-            return 0
-        shutil.rmtree(dvx_dir)
-        print(f"Removed {dvx_dir}")
+
+        # Also clear all caches and statuses
+        clear_cache()
+        clear_status()
+        print("Cleared all caches and statuses")
 
     return 0
 

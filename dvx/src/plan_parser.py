@@ -332,3 +332,143 @@ def clear_status() -> None:
     if status_file.exists():
         status_file.unlink()
         logger.info("Cleared status overrides")
+
+
+def clear_status_for_plan(filepath: str | Path) -> None:
+    """
+    Clear status overrides for tasks in a specific plan.
+
+    This removes only the task IDs that belong to this plan,
+    leaving other plan's task statuses intact.
+    """
+    filepath = Path(filepath)
+    status_file = _get_status_file()
+
+    if not status_file.exists():
+        return
+
+    # Get the task IDs from this plan
+    # We need to parse without cache to get task IDs
+    try:
+        # Clear the cache for this plan first
+        cache_path = _get_cache_path(filepath)
+        if cache_path.exists():
+            cache_path.unlink()
+            logger.debug(f"Cleared cache for {filepath}")
+
+        # Parse to get task IDs (this will use Claude since cache is cleared)
+        tasks = _parse_with_claude(filepath)
+        task_ids = {t.id for t in tasks}
+
+        # Load current status and remove only this plan's tasks
+        try:
+            data = json.loads(status_file.read_text())
+            statuses = data.get('status', {})
+
+            # Remove tasks from this plan
+            for task_id in list(statuses.keys()):
+                if task_id in task_ids:
+                    del statuses[task_id]
+
+            data['status'] = statuses
+            status_file.write_text(json.dumps(data, indent=2))
+            logger.info(f"Cleared {len(task_ids)} task statuses for {filepath}")
+        except Exception as e:
+            logger.warning(f"Failed to clear plan statuses: {e}")
+
+    except Exception as e:
+        logger.warning(f"Failed to parse plan for status clearing: {e}")
+        # Fall back to clearing all statuses
+        clear_status()
+
+
+def sync_plan_state(filepath: str | Path) -> dict:
+    """
+    Synchronize task status with the plan file's markers.
+
+    This is the "planner" that runs at the start of each `dvx run` to ensure
+    the status tracking file matches reality. It reads the plan file, has Claude
+    parse the [x] markers, and updates the status tracking file accordingly.
+
+    This handles cases where:
+    - The user manually updated the plan file
+    - The escalator completed multiple tasks in an interactive session
+    - `dvx clean` was run but status file wasn't properly cleared
+
+    Returns:
+        dict with sync results: {synced, added, removed, tasks}
+    """
+    filepath = Path(filepath)
+    logger.info(f"Syncing plan state for: {filepath}")
+
+    # Force a fresh parse by clearing the cache
+    cache_path = _get_cache_path(filepath)
+    if cache_path.exists():
+        cache_path.unlink()
+        logger.debug("Cleared cache for fresh parse")
+
+    # Parse the plan file fresh - Claude will read the [x] markers
+    tasks = _parse_with_claude(filepath)
+
+    # Save to cache for future use
+    _save_to_cache(filepath, tasks)
+
+    # Load current status overrides
+    current_statuses = _load_status_overrides()
+
+    # Sync: Update status file to match what Claude parsed from plan
+    synced = 0
+    added = 0
+    removed = 0
+
+    task_ids = {t.id for t in tasks}
+
+    for task in tasks:
+        current = current_statuses.get(task.id)
+
+        # If Claude found [x] (done) in the plan but we have pending/in_progress
+        if task.status == TaskStatus.DONE:
+            if current != TaskStatus.DONE.value:
+                _save_status_override(task.id, TaskStatus.DONE)
+                if current is None:
+                    added += 1
+                    logger.info(f"Added done status for task {task.id} from plan markers")
+                else:
+                    synced += 1
+                    logger.info(f"Synced task {task.id} to done (was {current})")
+
+        # If Claude found [ ] (pending) and we have done, trust the plan
+        elif task.status == TaskStatus.PENDING:
+            if current == TaskStatus.DONE.value:
+                _save_status_override(task.id, TaskStatus.PENDING)
+                synced += 1
+                logger.info(f"Synced task {task.id} to pending (was done)")
+
+        # Keep in_progress as is (don't override active work)
+
+    # Remove statuses for tasks that no longer exist in the plan
+    for task_id in list(current_statuses.keys()):
+        if task_id not in task_ids:
+            # Task was removed from plan - clean up status
+            # Load, modify, save
+            status_file = _get_status_file()
+            if status_file.exists():
+                try:
+                    data = json.loads(status_file.read_text())
+                    if task_id in data.get('status', {}):
+                        del data['status'][task_id]
+                        status_file.write_text(json.dumps(data, indent=2))
+                        removed += 1
+                        logger.info(f"Removed status for deleted task {task_id}")
+                except Exception:
+                    pass
+
+    result = {
+        'synced': synced,
+        'added': added,
+        'removed': removed,
+        'tasks': len(tasks),
+    }
+
+    logger.info(f"Plan sync complete: {synced} synced, {added} added, {removed} removed")
+    return result
