@@ -187,6 +187,48 @@ def setup_logging(verbose: bool = False, plan_file: Optional[str] = None) -> Non
     logging.getLogger().addHandler(file_handler)
 
 
+def check_git_environment() -> tuple[bool, str]:
+    """
+    Verify we're in a git repo and not on main/master branch.
+
+    Returns: (ok, error_message)
+    """
+    import subprocess
+
+    # Check if we're in a git repository
+    result = subprocess.run(
+        ["git", "rev-parse", "--is-inside-work-tree"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return False, "Not in a git repository. dvx requires a git-managed project."
+
+    # Get current branch
+    result = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return False, "Could not determine current git branch."
+
+    branch = result.stdout.strip()
+
+    if branch in ("main", "master"):
+        return False, f"""Cannot run dvx on '{branch}' branch.
+
+dvx should be run on a feature branch, not directly on {branch}.
+
+To fix this:
+  1. Create a new branch:  git checkout -b feature/my-feature
+  2. Then run:             dvx run <plan-file>
+
+This ensures all changes are isolated and can be reviewed before merging."""
+
+    return True, ""
+
+
 def cmd_run(args) -> int:
     """
     Run orchestration - handles all states automatically.
@@ -196,6 +238,12 @@ def cmd_run(args) -> int:
     - Paused: continues to next task
     - In progress: continues orchestration
     """
+    # Verify git environment
+    ok, error = check_git_environment()
+    if not ok:
+        print(f"Error: {error}")
+        return 1
+
     plan_file = str(Path(args.plan_file))
 
     if not Path(plan_file).exists():
