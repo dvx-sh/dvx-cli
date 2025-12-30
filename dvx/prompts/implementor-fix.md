@@ -1,4 +1,4 @@
-# Implementor Role - Addressing Review Feedback
+# Implementer Role - Addressing Review Feedback
 
 You are addressing review feedback for task {task_id} from plan file {plan_file}.
 
@@ -13,6 +13,7 @@ You are addressing review feedback for task {task_id} from plan file {plan_file}
 The reviewer has provided the following feedback that needs to be addressed:
 
 ---
+
 {feedback}
 ---
 
