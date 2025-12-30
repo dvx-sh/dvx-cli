@@ -276,45 +276,12 @@ def cmd_run(args) -> int:
         print(f"Error: Plan file not found: {plan_file}")
         return 1
 
-    # === PLANNER: Sync state with plan file ===
-    # This ensures the status tracking file matches the plan's [x] markers.
-    # Handles cases where: user manually updated plan, escalator completed tasks,
-    # or dvx clean was run but status file wasn't properly cleared.
-    print(f"Syncing plan state: {plan_file}")
-    sync_result = sync_plan_state(plan_file)
-    if sync_result['synced'] > 0 or sync_result['added'] > 0:
-        print(f"  Updated: {sync_result['synced']} synced, {sync_result['added']} added from plan markers")
-
+    # Check state first - skip sync for blocked/paused/complete states
     state = load_state(plan_file)
     step_mode = args.step
 
-    if state is None:
-        print(f"Starting orchestration of: {plan_file}")
-        print()
-
-        summary = get_plan_summary(plan_file)
-        print(f"Plan: {summary['total']} tasks")
-        print(f"  Done: {summary['done']}")
-        print(f"  In Progress: {summary['in_progress']}")
-        print(f"  Pending: {summary['pending']}")
-        print()
-
-        next_task = get_next_pending_task(plan_file)
-        if not next_task:
-            print("No pending tasks found!")
-            return 0
-
-        if step_mode:
-            print("Step mode: Will pause after each task for review")
-            print()
-
-        print(f"Starting with task {next_task.id}: {next_task.title}")
-        print("=" * 60)
-        print()
-
-        return run_orchestrator(plan_file, step_mode=step_mode)
-
-    elif state.phase == Phase.BLOCKED.value:
+    # Handle blocked state immediately (no sync needed)
+    if state is not None and state.phase == Phase.BLOCKED.value:
         print(f"Resuming blocked orchestration: {state.plan_file}")
         print(f"Current task: {state.current_task_id} - {state.current_task_title}")
         print()
@@ -343,6 +310,43 @@ def cmd_run(args) -> int:
 
         clear_blocked(plan_file)
         return run_orchestrator(state.plan_file, step_mode=state.step_mode)
+
+    # === PLANNER: Sync state with plan file ===
+    # This ensures the status tracking file matches the plan's [x] markers.
+    # Handles cases where: user manually updated plan, escalator completed tasks,
+    # or dvx clean was run but status file wasn't properly cleared.
+    # Skip for paused/complete states since we're just resuming.
+    if state is None or state.phase not in (Phase.PAUSED.value, Phase.COMPLETE.value):
+        print(f"Syncing plan state: {plan_file}")
+        sync_result = sync_plan_state(plan_file)
+        if sync_result['synced'] > 0 or sync_result['added'] > 0:
+            print(f"  Updated: {sync_result['synced']} synced, {sync_result['added']} added from plan markers")
+
+    if state is None:
+        print(f"Starting orchestration of: {plan_file}")
+        print()
+
+        summary = get_plan_summary(plan_file)
+        print(f"Plan: {summary['total']} tasks")
+        print(f"  Done: {summary['done']}")
+        print(f"  In Progress: {summary['in_progress']}")
+        print(f"  Pending: {summary['pending']}")
+        print()
+
+        next_task = get_next_pending_task(plan_file)
+        if not next_task:
+            print("No pending tasks found!")
+            return 0
+
+        if step_mode:
+            print("Step mode: Will pause after each task for review")
+            print()
+
+        print(f"Starting with task {next_task.id}: {next_task.title}")
+        print("=" * 60)
+        print()
+
+        return run_orchestrator(plan_file, step_mode=step_mode)
 
     elif state.phase == Phase.PAUSED.value:
         print(f"Resuming from step-mode pause: {state.plan_file}")
