@@ -26,7 +26,12 @@ class SessionResult:
 
 def _parse_output(raw_output: str) -> tuple[str, Optional[str], bool, Optional[str]]:
     """
-    Parse claude output for session ID and block signals.
+    Parse claude JSON output for session ID and block signals.
+
+    With --output-format json, Claude returns a JSON object with:
+    - session_id: UUID of the session
+    - result: The text response
+    - type: "result" for successful completion
 
     Returns: (text_output, session_id, is_blocked, block_reason)
     """
@@ -35,34 +40,43 @@ def _parse_output(raw_output: str) -> tuple[str, Optional[str], bool, Optional[s
     is_blocked = False
     block_reason = None
 
-    # Try to parse JSON output for session info
-    # Claude with --output-format json returns structured data
+    # Parse JSON output from --output-format json
     try:
-        lines = raw_output.strip().split('\n')
-        for line in lines:
-            if line.startswith('{'):
-                try:
-                    data = json.loads(line)
-                    if 'session_id' in data:
-                        session_id = data['session_id']
-                    if 'result' in data:
-                        text_output = data.get('result', raw_output)
-                except json.JSONDecodeError:
-                    pass
-    except Exception:
-        pass
+        # The output should be a single JSON object
+        data = json.loads(raw_output.strip())
+        if isinstance(data, dict):
+            session_id = data.get('session_id')
+            text_output = data.get('result', raw_output)
+            logger.debug(f"Parsed session_id: {session_id}")
+    except json.JSONDecodeError:
+        # Fallback: try line-by-line parsing in case of mixed output
+        try:
+            lines = raw_output.strip().split('\n')
+            for line in lines:
+                if line.startswith('{'):
+                    try:
+                        data = json.loads(line)
+                        if 'session_id' in data:
+                            session_id = data['session_id']
+                        if 'result' in data:
+                            text_output = data.get('result', raw_output)
+                    except json.JSONDecodeError:
+                        pass
+        except Exception:
+            pass
 
-    # Check for block signals in output
-    if '[BLOCKED:' in raw_output:
+    # Check for block signals in the text output
+    check_text = text_output if text_output else raw_output
+    if '[BLOCKED:' in check_text:
         is_blocked = True
         # Extract reason
-        start = raw_output.find('[BLOCKED:')
-        end = raw_output.find(']', start)
+        start = check_text.find('[BLOCKED:')
+        end = check_text.find(']', start)
         if end > start:
-            block_reason = raw_output[start + 9:end].strip()
+            block_reason = check_text[start + 9:end].strip()
 
     # Also check for BLOCKED file creation mention
-    if '.dvx/BLOCKED' in raw_output or 'BLOCKED.md' in raw_output:
+    if '.dvx/BLOCKED' in check_text or 'BLOCKED.md' in check_text:
         is_blocked = True
 
     return text_output, session_id, is_blocked, block_reason
@@ -73,6 +87,8 @@ def run_claude(
     cwd: Optional[str] = None,
     session_id: Optional[str] = None,
     timeout: int = 600,
+    model: Optional[str] = None,
+    append_system_prompt: Optional[str] = None,
 ) -> SessionResult:
     """
     Run Claude Code with the given prompt.
@@ -82,13 +98,21 @@ def run_claude(
         cwd: Working directory (defaults to current)
         session_id: Optional session ID to resume
         timeout: Timeout in seconds (default 10 minutes)
+        model: Optional model to use (e.g., 'opus', 'sonnet')
+        append_system_prompt: Optional text to append to system prompt
 
     Returns:
         SessionResult with output, session_id, and status
     """
     cwd = cwd or os.getcwd()
 
-    cmd = ['claude', '--dangerously-skip-permissions']
+    cmd = ['claude', '--dangerously-skip-permissions', '--output-format', 'json']
+
+    if model:
+        cmd.extend(['--model', model])
+
+    if append_system_prompt:
+        cmd.extend(['--append-system-prompt', append_system_prompt])
 
     if session_id:
         cmd.extend(['--resume', session_id])
@@ -111,6 +135,16 @@ def run_claude(
         output = result.stdout
         if result.stderr:
             logger.warning(f"Claude stderr: {result.stderr}")
+
+        # Log Claude's full output for debugging
+        logger.debug("=" * 60)
+        logger.debug("CLAUDE OUTPUT START")
+        logger.debug("=" * 60)
+        for line in output.split('\n'):
+            logger.debug(line)
+        logger.debug("=" * 60)
+        logger.debug("CLAUDE OUTPUT END")
+        logger.debug("=" * 60)
 
         text, sid, blocked, block_reason = _parse_output(output)
 

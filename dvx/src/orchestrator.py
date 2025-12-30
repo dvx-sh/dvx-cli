@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Optional
 import logging
 
-from claude_session import run_claude, launch_interactive, SessionResult
+from claude_session import run_claude, SessionResult
 from plan_parser import (
     get_next_pending_task, update_task_status, TaskStatus, Task,
     get_plan_summary,
@@ -230,20 +230,22 @@ Remember:
     return run_claude(prompt)
 
 
-def handle_blocked(state: State, reason: str, context: str, interactive: bool = False) -> int:
+def handle_blocked(state: State, reason: str, context: str, session_id: Optional[str] = None) -> int:
     """
-    Handle a blocked state - write context and optionally launch interactive session.
+    Handle a blocked state - write context for review.
 
     Args:
         state: Current orchestrator state
         reason: Why we're blocked
         context: Full context of the blockage
-        interactive: If True, launch an interactive Claude session immediately
+        session_id: Optional session ID from the blocking Claude session (overrides state.overseer_session_id)
     """
     logger.warning(f"Blocked: {reason}")
 
     update_phase(Phase.BLOCKED)
-    blocked_file = write_blocked_context(reason, context)
+    # Use provided session_id, fall back to overseer session
+    session_id = session_id or state.overseer_session_id
+    blocked_file = write_blocked_context(reason, context, session_id=session_id, plan_file=state.plan_file)
 
     print()
     print("=" * 60)
@@ -253,33 +255,24 @@ def handle_blocked(state: State, reason: str, context: str, interactive: bool = 
     print()
     print(f"Context written to: {blocked_file}")
     print()
-
-    if interactive:
-        print("Launching interactive session to resolve...")
-        print()
-        launch_interactive(session_id=state.overseer_session_id)
-        print()
-        print("Interactive session ended.")
-        print("Run 'dvx continue' to resume orchestration.")
-    else:
-        print("Options:")
-        print("  1. Review .dvx/blocked-context.md")
-        print("  2. Run 'claude --continue' to interact with the session")
-        print("  3. Resolve the issue")
-        print("  4. Run 'dvx continue' to resume")
+    print(f"Run `dvx run {state.plan_file}` and when resolved type `/exit` - dvx will continue.")
     print()
 
     return 1  # Exit with error to signal blocked state
 
 
-def run_orchestrator(plan_file: str) -> int:
+def run_orchestrator(plan_file: str, step_mode: bool = False) -> int:
     """
     Main orchestration loop.
 
-    Returns: 0 on success/completion, 1 on error/blocked
+    Args:
+        plan_file: Path to the plan file
+        step_mode: If True, pause after each task completion for review
+
+    Returns: 0 on success/completion, 1 on error/blocked/paused
     """
     try:
-        return _run_orchestrator_inner(plan_file)
+        return _run_orchestrator_inner(plan_file, step_mode)
     except KeyboardInterrupt:
         logger.info("Interrupted by user")
         print("\nInterrupted. Run 'dvx continue' to resume.")
@@ -295,7 +288,7 @@ def run_orchestrator(plan_file: str) -> int:
         return 1
 
 
-def _run_orchestrator_inner(plan_file: str) -> int:
+def _run_orchestrator_inner(plan_file: str, step_mode: bool = False) -> int:
     """Inner orchestration loop (wrapped by run_orchestrator for error handling)."""
     # Ensure .dvx directory exists
     ensure_dvx_dir()
@@ -304,9 +297,17 @@ def _run_orchestrator_inner(plan_file: str) -> int:
     state = load_state()
     if state is None:
         state = create_initial_state(plan_file)
+        state.step_mode = step_mode
+        save_state(state)
     elif state.plan_file != plan_file:
         logger.warning(f"Switching from {state.plan_file} to {plan_file}")
         state = create_initial_state(plan_file)
+        state.step_mode = step_mode
+        save_state(state)
+    elif step_mode and not state.step_mode:
+        # Enable step mode if requested
+        state.step_mode = step_mode
+        save_state(state)
 
     logger.info(f"Starting orchestration of {plan_file}")
 
@@ -355,6 +356,7 @@ def _run_orchestrator_inner(plan_file: str) -> int:
                 state,
                 impl_result.block_reason or "Implementation failed",
                 impl_result.output,
+                session_id=impl_result.session_id,
             )
 
         if impl_result.blocked:
@@ -362,6 +364,7 @@ def _run_orchestrator_inner(plan_file: str) -> int:
                 state,
                 impl_result.block_reason or "Implementor is blocked",
                 impl_result.output,
+                session_id=impl_result.session_id,
             )
 
         # === REVIEW PHASE ===
@@ -382,6 +385,7 @@ def _run_orchestrator_inner(plan_file: str) -> int:
                 state,
                 "Review failed",
                 review_result.output,
+                session_id=review_result.session_id,
             )
 
         review = parse_review_result(review_result.output)
@@ -397,6 +401,7 @@ def _run_orchestrator_inner(plan_file: str) -> int:
                     state,
                     f"Max iterations ({state.max_iterations}) exceeded - review loop not converging",
                     f"Last review feedback:\n{review['suggestions']}",
+                    session_id=session_id,
                 )
 
             if review['critical']:
@@ -404,6 +409,7 @@ def _run_orchestrator_inner(plan_file: str) -> int:
                     state,
                     "Critical issue found in review",
                     review['suggestions'],
+                    session_id=session_id,
                 )
 
             print(f"  Review iteration {iteration}: addressing feedback...")
@@ -420,6 +426,7 @@ def _run_orchestrator_inner(plan_file: str) -> int:
                     state,
                     impl_result.block_reason or "Fix implementation failed",
                     impl_result.output,
+                    session_id=impl_result.session_id,
                 )
 
             # Re-review
@@ -456,6 +463,7 @@ Run the tests after writing them to ensure they pass.
                     state,
                     test_result.block_reason or "Test writing failed",
                     test_result.output,
+                    session_id=test_result.session_id,
                 )
 
         # === COMMIT PHASE ===
@@ -469,6 +477,7 @@ Run the tests after writing them to ensure they pass.
                 state,
                 commit_result.block_reason or "Commit failed",
                 commit_result.output,
+                session_id=commit_result.session_id,
             )
 
         # Mark task as done
@@ -479,6 +488,19 @@ Run the tests after writing them to ensure they pass.
         state = load_state()
         state.iteration_count = 0
         save_state(state)
+
+        # Step mode: pause after each task for review
+        if state.step_mode:
+            print()
+            print("=" * 60)
+            print("PAUSED (step mode)")
+            print("=" * 60)
+            print(f"Task {task.id} ({task.title}) completed and committed.")
+            print()
+            print("Review the changes, then run 'dvx continue' for next task.")
+            print()
+            update_phase(Phase.PAUSED)
+            return 0  # Exit cleanly to allow review
 
         # Continue to next task...
 

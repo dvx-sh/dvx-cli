@@ -29,6 +29,7 @@ class Phase(Enum):
     TESTING = "testing"
     COMMITTING = "committing"
     BLOCKED = "blocked"
+    PAUSED = "paused"  # Step mode: paused after task completion
     COMPLETE = "complete"
 
 
@@ -42,6 +43,7 @@ class State:
     overseer_session_id: Optional[str] = None
     iteration_count: int = 0
     max_iterations: int = 3
+    step_mode: bool = False  # If True, pause after each task completion
     started_at: Optional[str] = None
     updated_at: Optional[str] = None
 
@@ -170,14 +172,18 @@ def set_overseer_session(session_id: str, project_dir: Optional[str] = None) -> 
     return state
 
 
-def write_blocked_context(reason: str, context: str, project_dir: Optional[str] = None) -> Path:
+def write_blocked_context(reason: str, context: str, session_id: Optional[str] = None, plan_file: Optional[str] = None, project_dir: Optional[str] = None) -> Path:
     """Write blocked context file for human review."""
     dvx_dir = ensure_dvx_dir(project_dir)
     blocked_file = dvx_dir / BLOCKED_FILE
 
+    # Use the plan file name for the run command
+    plan_name = plan_file or "PLAN.md"
+
     content = f"""# Blocked: {reason}
 
 **Time**: {datetime.now().isoformat()}
+**Session ID**: {session_id or 'unknown'}
 
 ## Context
 
@@ -185,11 +191,7 @@ def write_blocked_context(reason: str, context: str, project_dir: Optional[str] 
 
 ## Instructions
 
-1. Review the context above
-2. Run `claude --continue` to interact with the session
-3. Resolve the issue
-4. Type `/exit` in the Claude session
-5. Run `dvx continue` to resume orchestration
+Run `dvx run {plan_name}` and when resolved type `/exit` - dvx will continue.
 
 """
     blocked_file.write_text(content)
