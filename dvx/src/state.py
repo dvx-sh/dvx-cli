@@ -34,6 +34,7 @@ class Phase(Enum):
     FIXING = "fixing"
     TESTING = "testing"
     COMMITTING = "committing"
+    FINALIZING = "finalizing"  # Final review before merge
     BLOCKED = "blocked"
     PAUSED = "paused"  # Step mode: paused after task completion
     COMPLETE = "complete"

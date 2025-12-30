@@ -22,6 +22,7 @@ from state import (
     State,
     create_initial_state,
     ensure_dvx_dir,
+    get_dvx_dir,
     increment_iteration,
     load_state,
     log_decision,
@@ -283,6 +284,190 @@ def parse_escalation_result(output: str) -> dict:
     }
 
 
+def get_branch_info() -> tuple[str, str]:
+    """
+    Get current branch and base branch (main or master).
+
+    Returns: (current_branch, base_branch)
+    """
+    try:
+        # Get current branch
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        current_branch = result.stdout.strip()
+
+        # Determine base branch (main or master)
+        result = subprocess.run(
+            ["git", "branch", "--list", "main", "master"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        branches = result.stdout.strip().split('\n')
+        base_branch = "main" if any("main" in b for b in branches) else "master"
+
+        return current_branch, base_branch
+    except Exception as e:
+        logger.error(f"Error getting branch info: {e}")
+        return "HEAD", "main"
+
+
+def run_finalizer(plan_file: str) -> SessionResult:
+    """
+    Run the finalizer to review all changes before merge.
+
+    Uses Opus with ultrathink for thorough final review.
+
+    Args:
+        plan_file: Path to the plan file
+
+    Returns:
+        SessionResult with [APPROVED] or [ISSUES] decision
+    """
+    logger.info(f"Running finalizer for {plan_file}")
+
+    prompt_template = load_prompt("finalizer")
+
+    # Get branch info
+    current_branch, base_branch = get_branch_info()
+
+    # Read plan content
+    plan_content = Path(plan_file).read_text()
+
+    prompt = prompt_template.format(
+        plan_file=plan_file,
+        current_branch=current_branch,
+        base_branch=base_branch,
+        plan_content=plan_content,
+    )
+
+    # Use Opus with extended thinking for thorough review
+    return run_claude(
+        prompt,
+        model="opus",
+        append_system_prompt="Use extended thinking to thoroughly review all changes before approving.",
+    )
+
+
+def parse_finalizer_result(output: str) -> dict:
+    """
+    Parse the finalizer's output to determine next action.
+
+    Returns dict with:
+        - approved: bool - True if [APPROVED], False if [ISSUES]
+        - issues: list[str] - List of issues if not approved
+        - output: str - Full output
+    """
+    output_lower = output.lower()
+
+    approved = "[approved]" in output_lower
+    has_issues = "[issues]" in output_lower
+
+    # Extract issues if present
+    issues = []
+    if has_issues:
+        import re
+        # Look for "### Issue N:" patterns
+        issue_pattern = r'###\s*Issue\s*\d+[:\s]+(.+?)(?=###\s*Issue|\Z|##\s*Action)'
+        matches = re.findall(issue_pattern, output, re.DOTALL | re.IGNORECASE)
+        issues = [m.strip() for m in matches if m.strip()]
+
+    return {
+        "approved": approved and not has_issues,
+        "has_issues": has_issues,
+        "issues": issues,
+        "output": output,
+    }
+
+
+def run_finalizer_fix(issues: str, plan_file: str) -> SessionResult:
+    """
+    Run implementor to fix issues found by the finalizer.
+
+    Args:
+        issues: Description of issues to fix
+        plan_file: Path to the plan file
+
+    Returns:
+        SessionResult from the fix attempt
+    """
+    logger.info("Running implementor to fix finalizer issues")
+
+    prompt = f"""The finalizer has reviewed all changes and found issues that need to be addressed.
+
+## Issues to Fix
+
+{issues}
+
+## Instructions
+
+1. Carefully read each issue
+2. Fix the problems identified
+3. Run any relevant tests to verify your fixes
+4. Stage and commit your fixes with a clear commit message
+
+The plan file is: {plan_file}
+
+Focus on addressing the specific issues listed above. Do not make unrelated changes.
+"""
+
+    return run_claude(prompt)
+
+
+def cleanup_plan(plan_file: str) -> bool:
+    """
+    Delete the plan file, commit the deletion, and mark state as complete.
+
+    Preserves the .dvx/{plan}/ directory with DECISIONS files for reference.
+
+    Args:
+        plan_file: Path to the plan file
+
+    Returns:
+        True if cleanup succeeded, False otherwise
+    """
+    logger.info(f"Finalizing completed plan: {plan_file}")
+
+    try:
+        # Delete the plan file
+        plan_path = Path(plan_file)
+        if plan_path.exists():
+            plan_path.unlink()
+            logger.info(f"Deleted plan file: {plan_file}")
+
+        # Commit the deletion
+        result = subprocess.run(
+            ["git", "add", plan_file],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        result = subprocess.run(
+            ["git", "commit", "-m", f"Complete and remove {plan_file}\n\nAll tasks in the plan have been implemented, reviewed, and finalized.\n\n🤖 Generated with dvx"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        if result.returncode != 0:
+            logger.warning(f"Commit failed (may already be committed): {result.stderr}")
+
+        # Update state to complete (preserve .dvx directory with DECISIONS)
+        update_phase(Phase.COMPLETE, plan_file)
+        logger.info(f"Plan finalized. State and DECISIONS preserved in {get_dvx_dir(plan_file)}")
+
+        return True
+
+    except Exception as e:
+        logger.error(f"Cleanup failed: {e}")
+        return False
+
+
 def evaluate_trigger(
     state: State,
     task: Task,
@@ -422,6 +607,134 @@ def run_orchestrator(plan_file: str, step_mode: bool = False) -> int:
         return 1
 
 
+def _run_finalization(plan_file: str, state: State) -> int:
+    """
+    Run the finalization process after all tasks are complete.
+
+    This includes:
+    1. Running the finalizer to review all changes
+    2. If issues found, run fix cycles until resolved
+    3. On approval, delete plan file and clean up
+
+    Args:
+        plan_file: Path to the plan file
+        state: Current orchestrator state
+
+    Returns:
+        0 on success, 1 on error/blocked
+    """
+    summary = get_plan_summary(plan_file)
+
+    print()
+    print("=" * 60)
+    print("FINALIZING")
+    print("=" * 60)
+    print(f"All {summary['total']} tasks completed!")
+    print("Running final review...")
+    print()
+
+    update_phase(Phase.FINALIZING, plan_file)
+
+    max_finalizer_iterations = 5
+    iteration = 0
+
+    while iteration < max_finalizer_iterations:
+        iteration += 1
+
+        # Run the finalizer
+        print(f"  Finalizer review (attempt {iteration}/{max_finalizer_iterations})...")
+        finalizer_result = run_finalizer(plan_file)
+
+        if not finalizer_result.success:
+            # Finalizer itself failed - use escalater
+            should_continue, exit_code = evaluate_trigger(
+                state,
+                Task(id="finalizer", title="Final review", description="", status=TaskStatus.DONE),
+                "finalizer",
+                f"Finalizer failed: {finalizer_result.block_reason or 'unknown error'}",
+                finalizer_result.output,
+                session_id=finalizer_result.session_id,
+            )
+            if not should_continue:
+                return exit_code
+            # Escalater decided to proceed - treat as approved
+            break
+
+        result = parse_finalizer_result(finalizer_result.output)
+
+        if result["approved"]:
+            print("  Finalizer approved all changes!")
+            break
+
+        if result["has_issues"]:
+            print("  Finalizer found issues - running fixes...")
+            logger.info(f"Finalizer found {len(result['issues'])} issues")
+
+            # Run implementor to fix the issues
+            fix_result = run_finalizer_fix(result["output"], plan_file)
+
+            if not fix_result.success or fix_result.blocked:
+                reason = fix_result.block_reason or "Fix implementation failed"
+                should_continue, exit_code = evaluate_trigger(
+                    state,
+                    Task(id="finalizer-fix", title="Fix finalizer issues", description="", status=TaskStatus.IN_PROGRESS),
+                    "implementor",
+                    reason,
+                    fix_result.output,
+                    session_id=fix_result.session_id,
+                )
+                if not should_continue:
+                    return exit_code
+                # Escalater decided to proceed - continue to re-run finalizer
+
+            # Log any decisions made during fix
+            log_decisions_from_output(fix_result.output, plan_file)
+
+            # Loop back to run finalizer again
+            continue
+
+        # If we get here, finalizer output was unclear - treat as approved
+        logger.warning("Finalizer output unclear, treating as approved")
+        break
+
+    else:
+        # Exceeded max iterations
+        print(f"  Max finalizer iterations ({max_finalizer_iterations}) reached")
+        should_continue, exit_code = evaluate_trigger(
+            state,
+            Task(id="finalizer", title="Final review", description="", status=TaskStatus.DONE),
+            "orchestrator",
+            f"Finalizer fix loop exceeded {max_finalizer_iterations} iterations",
+            "The finalizer and implementor could not converge on an approved state.",
+        )
+        if not should_continue:
+            return exit_code
+        # Escalater decided to proceed anyway
+
+    # === CLEANUP ===
+    print()
+    print("  Cleaning up plan file and state...")
+
+    if cleanup_plan(plan_file):
+        dvx_dir = get_dvx_dir(plan_file)
+        print()
+        print("=" * 60)
+        print("COMPLETE")
+        print("=" * 60)
+        print(f"Plan {plan_file} successfully completed and removed!")
+        print()
+        print(f"State and DECISIONS preserved in: {dvx_dir}")
+        print("The branch is ready for merge.")
+        print()
+        print(f"To clean up: dvx clean {plan_file}")
+        print()
+        return 0
+    else:
+        print("  Warning: Cleanup encountered issues, but plan is complete.")
+        update_phase(Phase.COMPLETE, plan_file)
+        return 0
+
+
 def _run_orchestrator_inner(plan_file: str, step_mode: bool = False) -> int:
     """Inner orchestration loop (wrapped by run_orchestrator for error handling)."""
     # Ensure .dvx directory exists for this plan
@@ -447,18 +760,8 @@ def _run_orchestrator_inner(plan_file: str, step_mode: bool = False) -> int:
             # Check if we're done
             summary = get_plan_summary(plan_file)
             if summary['pending'] == 0 and summary['in_progress'] == 0:
-                print()
-                print("=" * 60)
-                print("COMPLETE")
-                print("=" * 60)
-                print(f"All {summary['total']} tasks completed!")
-                print()
-                print("You may want to:")
-                print("  - Review any decisions in .dvx/DECISIONS-*.md")
-                print("  - Remove the plan file if no longer needed")
-                print()
-                update_phase(Phase.COMPLETE, plan_file)
-                return 0
+                # All tasks complete - run finalizer
+                return _run_finalization(plan_file, state)
             else:
                 logger.warning("No pending tasks but plan not complete - check for blocked tasks")
                 return 1

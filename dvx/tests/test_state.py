@@ -75,6 +75,7 @@ class TestPhase:
         assert Phase.FIXING.value == "fixing"
         assert Phase.TESTING.value == "testing"
         assert Phase.COMMITTING.value == "committing"
+        assert Phase.FINALIZING.value == "finalizing"
         assert Phase.BLOCKED.value == "blocked"
         assert Phase.PAUSED.value == "paused"
         assert Phase.COMPLETE.value == "complete"

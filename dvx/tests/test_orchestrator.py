@@ -5,7 +5,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from orchestrator import parse_decisions, parse_escalation_result, parse_review_result
+from orchestrator import (
+    parse_decisions,
+    parse_escalation_result,
+    parse_finalizer_result,
+    parse_review_result,
+)
 
 
 class TestParseReviewResult:
@@ -273,3 +278,91 @@ alternatives:
 """
         decisions = parse_decisions(output)
         assert len(decisions) == 1
+
+
+class TestParseFinalizerResult:
+    """Tests for parse_finalizer_result."""
+
+    def test_approved_marker(self):
+        """[APPROVED] marker should set approved=True."""
+        result = parse_finalizer_result("""
+[APPROVED]
+
+## Summary
+All changes look good.
+
+## Quality Assessment
+- Code quality: Excellent
+- Test coverage: Good
+""")
+        assert result["approved"] is True
+        assert result["has_issues"] is False
+        assert result["issues"] == []
+
+    def test_issues_marker(self):
+        """[ISSUES] marker should set has_issues=True."""
+        result = parse_finalizer_result("""
+[ISSUES]
+
+## Summary
+Found some problems.
+
+### Issue 1: Missing error handling
+**Severity**: major
+**Location**: src/api.py:45
+**Description**: No try/catch around database call
+
+### Issue 2: Test coverage
+**Severity**: minor
+**Description**: New function lacks tests
+""")
+        assert result["approved"] is False
+        assert result["has_issues"] is True
+        assert len(result["issues"]) == 2
+
+    def test_issues_override_approved(self):
+        """If both markers present, issues takes precedence."""
+        result = parse_finalizer_result("[APPROVED]\n[ISSUES]\n### Issue 1: Problem")
+        assert result["approved"] is False
+        assert result["has_issues"] is True
+
+    def test_no_markers(self):
+        """No markers should default to not approved, no issues."""
+        result = parse_finalizer_result("Some analysis without clear decision.")
+        assert result["approved"] is False
+        assert result["has_issues"] is False
+
+    def test_case_insensitive(self):
+        """Markers should be case insensitive."""
+        result = parse_finalizer_result("[approved]\nAll good!")
+        assert result["approved"] is True
+
+        result = parse_finalizer_result("[issues]\n### Issue 1: Bug")
+        assert result["has_issues"] is True
+
+    def test_output_preserved(self):
+        """Full output should be preserved in result."""
+        output = "[APPROVED]\n\nFull review here."
+        result = parse_finalizer_result(output)
+        assert result["output"] == output
+
+    def test_issue_extraction(self):
+        """Issues should be extracted from the output."""
+        output = """
+[ISSUES]
+
+### Issue 1: Security vulnerability
+**Severity**: critical
+SQL injection possible in user input handling.
+
+### Issue 2: Performance
+**Severity**: minor
+Consider caching the database results.
+
+## Action Required
+Fix these before merge.
+"""
+        result = parse_finalizer_result(output)
+        assert len(result["issues"]) == 2
+        assert "Security vulnerability" in result["issues"][0]
+        assert "Performance" in result["issues"][1]
