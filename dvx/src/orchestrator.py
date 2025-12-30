@@ -420,8 +420,9 @@ Focus on addressing the specific issues listed above. Do not make unrelated chan
 
 def cleanup_plan(plan_file: str) -> bool:
     """
-    Delete the plan file, commit the deletion, and mark state as complete.
+    Finalize the plan by committing any pending changes and marking complete.
 
+    The plan file is LEFT IN PLACE so users can review that all tasks were done.
     Preserves the .dvx/{plan}/ directory with DECISIONS files for reference.
 
     Args:
@@ -433,29 +434,38 @@ def cleanup_plan(plan_file: str) -> bool:
     logger.info(f"Finalizing completed plan: {plan_file}")
 
     try:
-        # Delete the plan file
-        plan_path = Path(plan_file)
-        if plan_path.exists():
-            plan_path.unlink()
-            logger.info(f"Deleted plan file: {plan_file}")
-
-        # Commit the deletion
-        result = subprocess.run(
-            ["git", "add", plan_file],
+        # Check for any uncommitted changes (finalizer may have made fixes)
+        status_result = subprocess.run(
+            ["git", "status", "--porcelain"],
             capture_output=True,
             text=True,
             timeout=30,
         )
 
-        result = subprocess.run(
-            ["git", "commit", "-m", f"Complete and remove {plan_file}\n\nAll tasks in the plan have been implemented, reviewed, and finalized.\n\n🤖 Generated with dvx"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
+        if status_result.stdout.strip():
+            # There are uncommitted changes - commit them
+            logger.info("Committing pending changes from finalization...")
 
-        if result.returncode != 0:
-            logger.warning(f"Commit failed (may already be committed): {result.stderr}")
+            subprocess.run(
+                ["git", "add", "-A"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+            result = subprocess.run(
+                ["git", "commit", "-m", f"Complete {plan_file}\n\nAll tasks in the plan have been implemented, reviewed, and finalized.\n\n🤖 Generated with dvx"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+            if result.returncode != 0:
+                logger.warning(f"Commit failed: {result.stderr}")
+            else:
+                logger.info("Committed finalization changes")
+        else:
+            logger.info("No pending changes to commit")
 
         # Update state to complete (preserve .dvx directory with DECISIONS)
         update_phase(Phase.COMPLETE, plan_file)
@@ -614,7 +624,9 @@ def _run_finalization(plan_file: str, state: State) -> int:
     This includes:
     1. Running the finalizer to review all changes
     2. If issues found, run fix cycles until resolved
-    3. On approval, delete plan file and clean up
+    3. On approval, commit any pending changes and mark complete
+
+    The plan file is LEFT IN PLACE so users can review that all tasks were done.
 
     Args:
         plan_file: Path to the plan file
@@ -711,9 +723,9 @@ def _run_finalization(plan_file: str, state: State) -> int:
             return exit_code
         # Escalater decided to proceed anyway
 
-    # === CLEANUP ===
+    # === FINALIZE ===
     print()
-    print("  Cleaning up plan file and state...")
+    print("  Finalizing plan...")
 
     if cleanup_plan(plan_file):
         dvx_dir = get_dvx_dir(plan_file)
@@ -721,16 +733,18 @@ def _run_finalization(plan_file: str, state: State) -> int:
         print("=" * 60)
         print("COMPLETE")
         print("=" * 60)
-        print(f"Plan {plan_file} successfully completed and removed!")
+        print(f"Plan {plan_file} successfully completed!")
         print()
+        print(f"Plan file kept for review: {plan_file}")
         print(f"State and DECISIONS preserved in: {dvx_dir}")
+        print()
         print("The branch is ready for merge.")
         print()
-        print(f"To clean up: dvx clean {plan_file}")
+        print(f"To clean up after merge: dvx clean {plan_file}")
         print()
         return 0
     else:
-        print("  Warning: Cleanup encountered issues, but plan is complete.")
+        print("  Warning: Finalization encountered issues, but plan is complete.")
         update_phase(Phase.COMPLETE, plan_file)
         return 0
 

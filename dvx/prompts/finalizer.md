@@ -127,3 +127,14 @@ The orchestrator will run additional implement-review cycles to address these is
 - If tests fail, that's automatically an issue
 - Consider the full context of the project, not just the changes
 - This is the last check before merge - be rigorous but practical
+
+## IMPORTANT: Commit Any Fixes
+
+If you fix any issues during your review (formatting, linting, small bugs, etc.):
+
+1. **You MUST commit those changes** before outputting your final decision
+2. Stage the changes: `git add -A`
+3. Commit with a clear message: `git commit -m "fix: [description of what was fixed]"`
+4. Then output [APPROVED] or [ISSUES] as appropriate
+
+Do NOT leave uncommitted changes - the orchestrator expects a clean working tree after finalization.
