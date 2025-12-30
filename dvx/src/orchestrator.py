@@ -118,20 +118,20 @@ def get_git_diff() -> str:
         return f"Error getting git diff: {e}"
 
 
-def run_implementor(task: Task, plan_file: str, feedback: Optional[str] = None) -> SessionResult:
+def run_implementer(task: Task, plan_file: str, feedback: Optional[str] = None) -> SessionResult:
     """
-    Run a fresh implementor session for a task.
+    Run a fresh implementer session for a task.
 
     Args:
         task: The task to implement
         plan_file: Path to the plan file
         feedback: Optional feedback from reviewer to address
     """
-    logger.info(f"Running implementor for task {task.id}: {task.title}")
+    logger.info(f"Running implementer for task {task.id}: {task.title}")
 
-    prompt_template = load_prompt("implementor")
+    prompt_template = load_prompt("implementer")
     if feedback:
-        prompt_template = load_prompt("implementor-fix")
+        prompt_template = load_prompt("implementer-fix")
 
     # Build the prompt
     prompt = prompt_template.format(
@@ -235,7 +235,7 @@ def run_escalater(
 
     Args:
         task: The current task
-        trigger_source: Where the trigger came from (e.g., "implementor", "reviewer")
+        trigger_source: Where the trigger came from (e.g., "implementer", "reviewer")
         trigger_reason: Why the trigger was raised
         context: Full context of the situation
 
@@ -286,9 +286,9 @@ def parse_escalation_result(output: str) -> dict:
 
 def is_already_complete(output: str) -> bool:
     """
-    Check if implementor found the task was already complete.
+    Check if implementer found the task was already complete.
 
-    The implementor outputs [ALREADY_COMPLETE] when it detects the task
+    The implementer outputs [ALREADY_COMPLETE] when it detects the task
     has already been implemented in the codebase.
     """
     return "[already_complete]" in output.lower()
@@ -396,7 +396,7 @@ def parse_finalizer_result(output: str) -> dict:
 
 def run_finalizer_fix(issues: str, plan_file: str) -> SessionResult:
     """
-    Run implementor to fix issues found by the finalizer.
+    Run implementer to fix issues found by the finalizer.
 
     Args:
         issues: Description of issues to fix
@@ -405,7 +405,7 @@ def run_finalizer_fix(issues: str, plan_file: str) -> SessionResult:
     Returns:
         SessionResult from the fix attempt
     """
-    logger.info("Running implementor to fix finalizer issues")
+    logger.info("Running implementer to fix finalizer issues")
 
     prompt = f"""The finalizer has reviewed all changes and found issues that need to be addressed.
 
@@ -516,11 +516,30 @@ def evaluate_trigger(
     result = run_escalater(task, trigger_source, trigger_reason, context)
 
     if not result.success:
-        # Escalater itself failed - fall back to blocking
+        # Escalater itself failed - fall back to blocking with full context
+        blocked_context = f"""## Task
+
+**{task.id}**: {task.title}
+
+{task.description}
+
+## Trigger
+
+**Source**: {trigger_source}
+**Reason**: {trigger_reason}
+
+## Original Context
+
+{context}
+
+## Escalater Failure
+
+{result.block_reason or 'unknown error'}
+"""
         return False, handle_blocked(
             state,
             f"Escalater failed: {result.block_reason or 'unknown error'}",
-            context,
+            blocked_context,
             session_id=session_id,
         )
 
@@ -535,17 +554,39 @@ def evaluate_trigger(
 
     # Escalater decided to escalate to human
     print("  Escalater decided to escalate to human.")
+
+    # Build comprehensive blocked context for human review
+    blocked_context = f"""## Task
+
+**{task.id}**: {task.title}
+
+{task.description}
+
+## Trigger
+
+**Source**: {trigger_source}
+**Reason**: {trigger_reason}
+
+## Original Context
+
+{context}
+
+## Escalater Analysis
+
+{result.output if result.output else "(No analysis output captured)"}
+"""
+
     return False, handle_blocked(
         state,
         f"Escalated by escalater: {trigger_reason}",
-        result.output,  # Use escalater's full output as context
+        blocked_context,
         session_id=session_id,
     )
 
 
-def run_implementor_commit(task: Task, plan_file: str) -> SessionResult:
-    """Tell the implementor to update the plan and commit."""
-    logger.info("Running implementor commit...")
+def run_implementer_commit(task: Task, plan_file: str) -> SessionResult:
+    """Tell the implementer to update the plan and commit."""
+    logger.info("Running implementer commit...")
 
     prompt = f"""The implementation for task {task.id} ({task.title}) has been reviewed and approved.
 
@@ -692,7 +733,7 @@ def _run_finalization(plan_file: str, state: State) -> int:
             print("  Finalizer found issues - running fixes...")
             logger.info(f"Finalizer found {len(result['issues'])} issues")
 
-            # Run implementor to fix the issues
+            # Run implementer to fix the issues
             fix_result = run_finalizer_fix(result["output"], plan_file)
 
             if not fix_result.success or fix_result.blocked:
@@ -700,7 +741,7 @@ def _run_finalization(plan_file: str, state: State) -> int:
                 should_continue, exit_code = evaluate_trigger(
                     state,
                     Task(id="finalizer-fix", title="Fix finalizer issues", description="", status=TaskStatus.IN_PROGRESS),
-                    "implementor",
+                    "implementer",
                     reason,
                     fix_result.output,
                     session_id=fix_result.session_id,
@@ -727,7 +768,7 @@ def _run_finalization(plan_file: str, state: State) -> int:
             Task(id="finalizer", title="Final review", description="", status=TaskStatus.DONE),
             "orchestrator",
             f"Finalizer fix loop exceeded {max_finalizer_iterations} iterations",
-            "The finalizer and implementor could not converge on an approved state.",
+            "The finalizer and implementer could not converge on an approved state.",
         )
         if not should_continue:
             return exit_code
@@ -802,7 +843,7 @@ def _run_orchestrator_inner(plan_file: str, step_mode: bool = False) -> int:
         update_phase(Phase.IMPLEMENTING, plan_file)
         logger.info(f"Implementing task {task.id}")
 
-        impl_result = run_implementor(task, plan_file)
+        impl_result = run_implementer(task, plan_file)
 
         # Log any decisions made during implementation
         log_decisions_from_output(impl_result.output, plan_file)
@@ -822,9 +863,9 @@ def _run_orchestrator_inner(plan_file: str, step_mode: bool = False) -> int:
             continue
 
         if not impl_result.success or impl_result.blocked:
-            reason = impl_result.block_reason or ("Implementation failed" if not impl_result.success else "Implementor is blocked")
+            reason = impl_result.block_reason or ("Implementation failed" if not impl_result.success else "Implementer is blocked")
             should_continue, exit_code = evaluate_trigger(
-                state, task, "implementor", reason,
+                state, task, "implementer", reason,
                 impl_result.output, session_id=impl_result.session_id,
             )
             if not should_continue:
@@ -886,8 +927,8 @@ def _run_orchestrator_inner(plan_file: str, step_mode: bool = False) -> int:
             print(f"  Review iteration {iteration}: addressing feedback...")
             update_phase(Phase.FIXING, plan_file)
 
-            # Run implementor with feedback
-            impl_result = run_implementor(task, plan_file, feedback=review['suggestions'])
+            # Run implementer with feedback
+            impl_result = run_implementer(task, plan_file, feedback=review['suggestions'])
 
             # Log any decisions made during fix
             log_decisions_from_output(impl_result.output, plan_file)
@@ -895,7 +936,7 @@ def _run_orchestrator_inner(plan_file: str, step_mode: bool = False) -> int:
             if not impl_result.success or impl_result.blocked:
                 reason = impl_result.block_reason or "Fix implementation failed"
                 should_continue, exit_code = evaluate_trigger(
-                    state, task, "implementor", reason,
+                    state, task, "implementer", reason,
                     impl_result.output, session_id=impl_result.session_id,
                 )
                 if not should_continue:
@@ -934,7 +975,7 @@ Run the tests after writing them to ensure they pass.
             if not test_result.success or test_result.blocked:
                 reason = test_result.block_reason or "Test writing failed"
                 should_continue, exit_code = evaluate_trigger(
-                    state, task, "implementor", reason,
+                    state, task, "implementer", reason,
                     test_result.output, session_id=test_result.session_id,
                 )
                 if not should_continue:
@@ -945,12 +986,12 @@ Run the tests after writing them to ensure they pass.
         print("  Committing changes...")
         update_phase(Phase.COMMITTING, plan_file)
 
-        commit_result = run_implementor_commit(task, plan_file)
+        commit_result = run_implementer_commit(task, plan_file)
 
         if not commit_result.success or commit_result.blocked:
             reason = commit_result.block_reason or "Commit failed"
             should_continue, exit_code = evaluate_trigger(
-                state, task, "implementor", reason,
+                state, task, "implementer", reason,
                 commit_result.output, session_id=commit_result.session_id,
             )
             if not should_continue:
