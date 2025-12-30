@@ -9,6 +9,7 @@ import argparse
 import logging
 import sys
 from pathlib import Path
+from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -20,8 +21,8 @@ from state import (
     clear_blocked,
     get_decisions,
     get_dvx_dir,
+    get_dvx_root,
     load_state,
-    reset_state,
     save_state,
     update_phase,
 )
@@ -161,7 +162,7 @@ CRITICAL: Output ONLY the raw markdown plan. Start immediately with "# Plan:" - 
     return 0
 
 
-def setup_logging(verbose: bool = False) -> None:
+def setup_logging(verbose: bool = False, plan_file: Optional[str] = None) -> None:
     level = logging.DEBUG if verbose else logging.INFO
     format_str = "%(asctime)s [%(levelname)s] %(message)s" if verbose else "%(message)s"
 
@@ -171,15 +172,61 @@ def setup_logging(verbose: bool = False) -> None:
         handlers=[logging.StreamHandler()],
     )
 
-    # Ensure .dvx/ exists and set up file logging
-    dvx_dir = get_dvx_dir()
-    dvx_dir.mkdir(exist_ok=True)
+    # Set up file logging in plan-specific or root .dvx directory
+    if plan_file:
+        dvx_dir = get_dvx_dir(plan_file)
+        dvx_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        dvx_dir = get_dvx_root()
+        dvx_dir.mkdir(exist_ok=True)
 
     log_file = dvx_dir / "dvx.log"
     file_handler = logging.FileHandler(log_file)
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
     logging.getLogger().addHandler(file_handler)
+
+
+def check_git_environment() -> tuple[bool, str]:
+    """
+    Verify we're in a git repo and not on main/master branch.
+
+    Returns: (ok, error_message)
+    """
+    import subprocess
+
+    # Check if we're in a git repository
+    result = subprocess.run(
+        ["git", "rev-parse", "--is-inside-work-tree"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return False, "Not in a git repository. dvx requires a git-managed project."
+
+    # Get current branch
+    result = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return False, "Could not determine current git branch."
+
+    branch = result.stdout.strip()
+
+    if branch in ("main", "master"):
+        return False, f"""Cannot run dvx on '{branch}' branch.
+
+dvx should be run on a feature branch, not directly on {branch}.
+
+To fix this:
+  1. Create a new branch:  git checkout -b feature/my-feature
+  2. Then run:             dvx run <plan-file>
+
+This ensures all changes are isolated and can be reviewed before merging."""
+
+    return True, ""
 
 
 def cmd_run(args) -> int:
@@ -191,22 +238,20 @@ def cmd_run(args) -> int:
     - Paused: continues to next task
     - In progress: continues orchestration
     """
-    plan_file = Path(args.plan_file)
+    # Verify git environment
+    ok, error = check_git_environment()
+    if not ok:
+        print(f"Error: {error}")
+        return 1
 
-    if not plan_file.exists():
+    plan_file = str(Path(args.plan_file))
+
+    if not Path(plan_file).exists():
         print(f"Error: Plan file not found: {plan_file}")
         return 1
 
-    state = load_state()
+    state = load_state(plan_file)
     step_mode = args.step
-
-    if state and state.plan_file != str(plan_file):
-        if not args.force:
-            print(f"Warning: Existing state is for different plan: {state.plan_file}")
-            print(f"Use 'dvx run --force {plan_file}' to start fresh with new plan.")
-            return 1
-        reset_state()
-        state = None
 
     if state is None:
         print(f"Starting orchestration of: {plan_file}")
@@ -232,14 +277,14 @@ def cmd_run(args) -> int:
         print("=" * 60)
         print()
 
-        return run_orchestrator(str(plan_file), step_mode=step_mode)
+        return run_orchestrator(plan_file, step_mode=step_mode)
 
     elif state.phase == Phase.BLOCKED.value:
         print(f"Resuming blocked orchestration: {state.plan_file}")
         print(f"Current task: {state.current_task_id} - {state.current_task_title}")
         print()
 
-        blocked_file = get_dvx_dir() / "blocked-context.md"
+        blocked_file = get_dvx_dir(plan_file) / "blocked-context.md"
         if blocked_file.exists():
             print("Blocked context:")
             print("-" * 40)
@@ -261,14 +306,14 @@ def cmd_run(args) -> int:
         print("Clearing blocked state and continuing...")
         print()
 
-        clear_blocked()
+        clear_blocked(plan_file)
         return run_orchestrator(state.plan_file, step_mode=state.step_mode)
 
     elif state.phase == Phase.PAUSED.value:
         print(f"Resuming from step-mode pause: {state.plan_file}")
         print()
 
-        update_phase(Phase.IDLE)
+        update_phase(Phase.IDLE, plan_file)
         return run_orchestrator(state.plan_file, step_mode=state.step_mode)
 
     elif state.phase == Phase.COMPLETE.value:
@@ -293,17 +338,17 @@ def cmd_run(args) -> int:
 
 
 def cmd_status(args) -> int:
-    """Show current orchestration status."""
-    state = load_state()
+    """Show current orchestration status for a plan."""
+    plan_file = args.plan_file
+    state = load_state(plan_file)
 
     if state is None:
-        print("No active orchestration.")
-        print("Use 'dvx run <plan-file>' to begin.")
+        print(f"No active orchestration for: {plan_file}")
+        print(f"Use 'dvx run {plan_file}' to begin.")
         return 0
 
-    print("DVX Status")
+    print(f"DVX Status: {plan_file}")
     print("=" * 40)
-    print(f"Plan file: {state.plan_file}")
     print(f"Phase: {state.phase}")
     print(f"Current task: {state.current_task_id or 'none'} - {state.current_task_title or ''}")
     print(f"Iteration: {state.iteration_count}/{state.max_iterations}")
@@ -314,10 +359,11 @@ def cmd_status(args) -> int:
 
     if state.phase == Phase.PAUSED.value:
         print("PAUSED - Task completed, waiting for review")
-        print("Run 'dvx run <plan-file>' to continue.")
+        print(f"Run 'dvx run {plan_file}' to continue.")
     elif state.phase == Phase.BLOCKED.value:
-        print("BLOCKED - See .dvx/blocked-context.md for details")
-        print("Run 'dvx run <plan-file>' to resolve and continue.")
+        blocked_file = get_dvx_dir(plan_file) / "blocked-context.md"
+        print(f"BLOCKED - See {blocked_file} for details")
+        print(f"Run 'dvx run {plan_file}' to resolve and continue.")
     else:
         try:
             summary = get_plan_summary(state.plan_file)
@@ -329,14 +375,15 @@ def cmd_status(args) -> int:
 
 
 def cmd_decisions(args) -> int:
-    """Show decisions made during orchestration."""
-    decision_files = get_decisions()
+    """Show decisions made during orchestration for a plan."""
+    plan_file = args.plan_file
+    decision_files = get_decisions(plan_file)
 
     if not decision_files:
-        print("No decisions recorded yet.")
+        print(f"No decisions recorded for: {plan_file}")
         return 0
 
-    print("Decisions made during orchestration:")
+    print(f"Decisions for: {plan_file}")
     print("=" * 40)
 
     for decision_file in decision_files:
@@ -348,17 +395,28 @@ def cmd_decisions(args) -> int:
 
 
 def cmd_clean(args) -> int:
-    """Delete the .dvx/ directory in current working directory."""
+    """Delete .dvx/ directory or plan-specific subdirectory."""
     import shutil
 
-    dvx_dir = get_dvx_dir()
+    plan_file = args.plan_file if hasattr(args, 'plan_file') and args.plan_file else None
 
-    if not dvx_dir.exists():
-        print("No .dvx/ directory to clean.")
-        return 0
+    if plan_file:
+        # Clean specific plan
+        dvx_dir = get_dvx_dir(plan_file)
+        if not dvx_dir.exists():
+            print(f"No state directory for: {plan_file}")
+            return 0
+        shutil.rmtree(dvx_dir)
+        print(f"Removed {dvx_dir}")
+    else:
+        # Clean entire .dvx directory
+        dvx_dir = get_dvx_root()
+        if not dvx_dir.exists():
+            print("No .dvx/ directory to clean.")
+            return 0
+        shutil.rmtree(dvx_dir)
+        print(f"Removed {dvx_dir}")
 
-    shutil.rmtree(dvx_dir)
-    print(f"Removed {dvx_dir}")
     return 0
 
 
@@ -379,15 +437,18 @@ def main() -> int:
     run_parser.set_defaults(func=cmd_run)
 
     # status
-    status_parser = subparsers.add_parser("status", help="Show current status")
+    status_parser = subparsers.add_parser("status", help="Show current status for a plan")
+    status_parser.add_argument("plan_file", help="Path to PLAN-*.md file")
     status_parser.set_defaults(func=cmd_status)
 
     # decisions
-    decisions_parser = subparsers.add_parser("decisions", help="Show decisions made")
+    decisions_parser = subparsers.add_parser("decisions", help="Show decisions made for a plan")
+    decisions_parser.add_argument("plan_file", help="Path to PLAN-*.md file")
     decisions_parser.set_defaults(func=cmd_decisions)
 
     # clean
-    clean_parser = subparsers.add_parser("clean", help="Delete .dvx/ directory")
+    clean_parser = subparsers.add_parser("clean", help="Delete .dvx/ directory (all) or plan-specific state")
+    clean_parser.add_argument("plan_file", nargs="?", help="Path to PLAN-*.md file (optional, cleans all if omitted)")
     clean_parser.set_defaults(func=cmd_clean)
 
     # plan
@@ -397,7 +458,9 @@ def main() -> int:
 
     args = parser.parse_args()
 
-    setup_logging(args.verbose)
+    # Get plan_file for logging if available
+    plan_file = getattr(args, 'plan_file', None)
+    setup_logging(args.verbose, plan_file)
 
     if args.command is None:
         parser.print_help()

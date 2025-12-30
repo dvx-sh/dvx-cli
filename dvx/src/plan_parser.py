@@ -220,17 +220,31 @@ Important:
 
 
 def _apply_status_overrides(tasks: list[Task]) -> list[Task]:
-    """Apply status overrides from tracking file to tasks."""
+    """
+    Apply status overrides from tracking file to tasks.
+
+    IMPORTANT: The status tracking file (.dvx/task-status.json) is the source
+    of truth for task completion. Tasks NOT in the override file are reset to
+    PENDING, regardless of what status Claude assigned during parsing.
+
+    This prevents the finalizer from being called too soon when Claude
+    mistakenly marks unimplemented tasks as "done" (e.g., by misinterpreting
+    [x] markers in the plan file).
+    """
     overrides = _load_status_overrides()
-    if not overrides:
-        return tasks
 
     for task in tasks:
         if task.id in overrides:
+            # Task has an explicit status override - use it
             try:
                 task.status = TaskStatus(overrides[task.id])
             except ValueError:
-                pass
+                task.status = TaskStatus.PENDING
+        else:
+            # Task NOT in overrides - reset to PENDING
+            # This ensures Claude's parsing status doesn't incorrectly mark
+            # tasks as done when they haven't been implemented
+            task.status = TaskStatus.PENDING
 
     return tasks
 
