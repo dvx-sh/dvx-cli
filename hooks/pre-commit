@@ -1,0 +1,22 @@
+#!/bin/bash
+# Pre-commit hook for dvx-cli
+# Runs linting and tests before allowing commit
+
+set -e
+
+echo "Running pre-commit checks..."
+
+# Change to dvx directory
+cd "$(git rev-parse --show-toplevel)/dvx"
+
+# Activate venv if it exists
+if [ -f "${HOME}/.dvx/.venv/bin/activate" ]; then
+    source "${HOME}/.dvx/.venv/bin/activate"
+elif [ -f ".venv/bin/activate" ]; then
+    source ".venv/bin/activate"
+fi
+
+# Run invoke check
+invoke check
+
+echo "Pre-commit checks passed!"

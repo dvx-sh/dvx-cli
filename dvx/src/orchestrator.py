@@ -4,22 +4,32 @@ Main orchestrator loop for dvx.
 Coordinates the implement → review → fix → test → commit cycle.
 """
 
-import os
+import logging
 import subprocess
 from pathlib import Path
 from typing import Optional
-import logging
 
-from claude_session import run_claude, SessionResult
+from claude_session import SessionResult, run_claude
 from plan_parser import (
-    get_next_pending_task, update_task_status, TaskStatus, Task,
+    Task,
+    TaskStatus,
+    get_next_pending_task,
     get_plan_summary,
+    update_task_status,
 )
 from state import (
-    State, Phase, load_state, save_state, create_initial_state,
-    update_phase, set_current_task, increment_iteration,
-    set_overseer_session, write_blocked_context, log_decision,
+    Phase,
+    State,
+    create_initial_state,
     ensure_dvx_dir,
+    increment_iteration,
+    load_state,
+    log_decision,
+    save_state,
+    set_current_task,
+    set_overseer_session,
+    update_phase,
+    write_blocked_context,
 )
 
 logger = logging.getLogger(__name__)
@@ -210,6 +220,123 @@ def parse_review_result(output: str) -> dict:
     }
 
 
+def run_escalater(
+    task: Task,
+    trigger_source: str,
+    trigger_reason: str,
+    context: str,
+) -> SessionResult:
+    """
+    Run the escalater to evaluate a trigger and decide next steps.
+
+    Uses Opus with ultrathink for deep reasoning.
+
+    Args:
+        task: The current task
+        trigger_source: Where the trigger came from (e.g., "implementor", "reviewer")
+        trigger_reason: Why the trigger was raised
+        context: Full context of the situation
+
+    Returns:
+        SessionResult with [PROCEED] or [ESCALATE] decision
+    """
+    logger.info(f"Running escalater for trigger from {trigger_source}: {trigger_reason}")
+
+    prompt_template = load_prompt("escalater")
+
+    prompt = prompt_template.format(
+        task_id=task.id,
+        task_title=task.title,
+        trigger_source=trigger_source,
+        trigger_reason=trigger_reason,
+        context=context,
+    )
+
+    # Use Opus with extended thinking for thorough analysis
+    return run_claude(
+        prompt,
+        model="opus",
+        append_system_prompt="Use extended thinking to thoroughly analyze this situation before making a decision.",
+    )
+
+
+def parse_escalation_result(output: str) -> dict:
+    """
+    Parse the escalater's output to determine next action.
+
+    Returns dict with:
+        - proceed: bool - True if [PROCEED], False if [ESCALATE]
+        - analysis: str - The analysis section
+        - action_plan: str - The action plan if proceeding
+        - escalation_reason: str - Why escalation is needed if escalating
+    """
+    output_lower = output.lower()
+
+    proceed = "[proceed]" in output_lower
+    escalate = "[escalate]" in output_lower
+
+    return {
+        "proceed": proceed and not escalate,
+        "escalate": escalate,
+        "output": output,
+    }
+
+
+def evaluate_trigger(
+    state: State,
+    task: Task,
+    trigger_source: str,
+    trigger_reason: str,
+    context: str,
+    session_id: Optional[str] = None,
+) -> tuple[bool, Optional[int]]:
+    """
+    Evaluate a trigger using the escalater.
+
+    Args:
+        state: Current orchestrator state
+        task: The current task
+        trigger_source: Where the trigger came from
+        trigger_reason: Why the trigger was raised
+        context: Full context
+        session_id: Optional session ID from the triggering session
+
+    Returns:
+        (should_continue, exit_code) - if should_continue is True, proceed with orchestration
+        if False, exit_code is the return code (1 for blocked)
+    """
+    print(f"  Evaluating trigger from {trigger_source}...")
+
+    result = run_escalater(task, trigger_source, trigger_reason, context)
+
+    if not result.success:
+        # Escalater itself failed - fall back to blocking
+        return False, handle_blocked(
+            state,
+            f"Escalater failed: {result.block_reason or 'unknown error'}",
+            context,
+            session_id=session_id,
+        )
+
+    decision = parse_escalation_result(result.output)
+
+    if decision["proceed"]:
+        print("  Escalater decided to proceed.")
+        logger.info(f"Escalater proceeding: {trigger_reason}")
+        # Log the escalater's decision
+        log_decisions_from_output(result.output)
+        return True, None
+
+    # Escalater decided to escalate to human
+    print("  Escalater decided to escalate to human.")
+    return False, handle_blocked(
+        state,
+        f"Escalated by escalater: {trigger_reason}",
+        result.output,  # Use escalater's full output as context
+        session_id=session_id,
+    )
+
+
 def run_implementor_commit(task: Task, plan_file: str) -> SessionResult:
     """Tell the implementor to update the plan and commit."""
     logger.info("Running implementor commit...")
@@ -351,21 +478,15 @@ def _run_orchestrator_inner(plan_file: str, step_mode: bool = False) -> int:
         # Log any decisions made during implementation
         log_decisions_from_output(impl_result.output)
 
-        if not impl_result.success:
-            return handle_blocked(
-                state,
-                impl_result.block_reason or "Implementation failed",
-                impl_result.output,
-                session_id=impl_result.session_id,
+        if not impl_result.success or impl_result.blocked:
+            reason = impl_result.block_reason or ("Implementation failed" if not impl_result.success else "Implementor is blocked")
+            should_continue, exit_code = evaluate_trigger(
+                state, task, "implementor", reason,
+                impl_result.output, session_id=impl_result.session_id,
             )
-
-        if impl_result.blocked:
-            return handle_blocked(
-                state,
-                impl_result.block_reason or "Implementor is blocked",
-                impl_result.output,
-                session_id=impl_result.session_id,
-            )
+            if not should_continue:
+                return exit_code
+            # Escalater decided to proceed - continue to review
 
         # === REVIEW PHASE ===
         update_phase(Phase.REVIEWING)
@@ -381,12 +502,13 @@ def _run_orchestrator_inner(plan_file: str, step_mode: bool = False) -> int:
             set_overseer_session(session_id)
 
         if not review_result.success:
-            return handle_blocked(
-                state,
-                "Review failed",
-                review_result.output,
-                session_id=review_result.session_id,
+            should_continue, exit_code = evaluate_trigger(
+                state, task, "reviewer", "Review failed",
+                review_result.output, session_id=review_result.session_id,
             )
+            if not should_continue:
+                return exit_code
+            # Escalater decided to proceed - treat as approved
 
         review = parse_review_result(review_result.output)
 
@@ -397,20 +519,26 @@ def _run_orchestrator_inner(plan_file: str, step_mode: bool = False) -> int:
             state, exceeded = increment_iteration()
 
             if exceeded:
-                return handle_blocked(
-                    state,
+                should_continue, exit_code = evaluate_trigger(
+                    state, task, "orchestrator",
                     f"Max iterations ({state.max_iterations}) exceeded - review loop not converging",
                     f"Last review feedback:\n{review['suggestions']}",
                     session_id=session_id,
                 )
+                if not should_continue:
+                    return exit_code
+                # Escalater decided to allow more iterations - reset and continue
+                state.iteration_count = 0
+                save_state(state)
 
             if review['critical']:
-                return handle_blocked(
-                    state,
-                    "Critical issue found in review",
-                    review['suggestions'],
-                    session_id=session_id,
+                should_continue, exit_code = evaluate_trigger(
+                    state, task, "reviewer", "Critical issue found in review",
+                    review['suggestions'], session_id=session_id,
                 )
+                if not should_continue:
+                    return exit_code
+                # Escalater decided critical issue is not blocking - continue
 
             print(f"  Review iteration {iteration}: addressing feedback...")
             update_phase(Phase.FIXING)
@@ -422,12 +550,14 @@ def _run_orchestrator_inner(plan_file: str, step_mode: bool = False) -> int:
             log_decisions_from_output(impl_result.output)
 
             if not impl_result.success or impl_result.blocked:
-                return handle_blocked(
-                    state,
-                    impl_result.block_reason or "Fix implementation failed",
-                    impl_result.output,
-                    session_id=impl_result.session_id,
+                reason = impl_result.block_reason or "Fix implementation failed"
+                should_continue, exit_code = evaluate_trigger(
+                    state, task, "implementor", reason,
+                    impl_result.output, session_id=impl_result.session_id,
                 )
+                if not should_continue:
+                    return exit_code
+                # Escalater decided to proceed - continue to re-review
 
             # Re-review
             update_phase(Phase.REVIEWING)
@@ -459,12 +589,14 @@ Run the tests after writing them to ensure they pass.
             test_result = run_claude(test_prompt)
 
             if not test_result.success or test_result.blocked:
-                return handle_blocked(
-                    state,
-                    test_result.block_reason or "Test writing failed",
-                    test_result.output,
-                    session_id=test_result.session_id,
+                reason = test_result.block_reason or "Test writing failed"
+                should_continue, exit_code = evaluate_trigger(
+                    state, task, "implementor", reason,
+                    test_result.output, session_id=test_result.session_id,
                 )
+                if not should_continue:
+                    return exit_code
+                # Escalater decided to proceed without tests
 
         # === COMMIT PHASE ===
         print("  Committing changes...")
@@ -473,12 +605,14 @@ Run the tests after writing them to ensure they pass.
         commit_result = run_implementor_commit(task, plan_file)
 
         if not commit_result.success or commit_result.blocked:
-            return handle_blocked(
-                state,
-                commit_result.block_reason or "Commit failed",
-                commit_result.output,
-                session_id=commit_result.session_id,
+            reason = commit_result.block_reason or "Commit failed"
+            should_continue, exit_code = evaluate_trigger(
+                state, task, "implementor", reason,
+                commit_result.output, session_id=commit_result.session_id,
             )
+            if not should_continue:
+                return exit_code
+            # Escalater decided commit issue is not blocking - mark task done anyway
 
         # Mark task as done
         update_task_status(plan_file, task.id, TaskStatus.DONE)

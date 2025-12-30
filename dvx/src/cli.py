@@ -6,26 +6,32 @@ Automates the implement → review → test → commit development loop.
 """
 
 import argparse
-import sys
 import logging
+import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from state import (
-    load_state, reset_state, get_decisions, clear_blocked,
-    get_dvx_dir, Phase, update_phase, save_state,
-)
-from plan_parser import get_plan_summary, get_next_pending_task
-from orchestrator import run_orchestrator
 from claude_session import launch_interactive, run_claude
+from orchestrator import run_orchestrator
+from plan_parser import get_next_pending_task, get_plan_summary
+from state import (
+    Phase,
+    clear_blocked,
+    get_decisions,
+    get_dvx_dir,
+    load_state,
+    reset_state,
+    save_state,
+    update_phase,
+)
 
 
 def get_user_input_from_editor() -> str:
     """Open $EDITOR to get user input, return the text."""
-    import tempfile
-    import subprocess
     import os
+    import subprocess
+    import tempfile
 
     editor = os.environ.get("EDITOR", os.environ.get("VISUAL", "vi"))
 
@@ -38,7 +44,7 @@ def get_user_input_from_editor() -> str:
         with open(temp_path, "r") as f:
             content = f.read()
         # Remove the template lines if unchanged
-        lines = [l for l in content.split("\n") if not l.startswith("#")]
+        lines = [line for line in content.split("\n") if not line.startswith("#")]
         return "\n".join(lines).strip()
     finally:
         os.unlink(temp_path)
@@ -52,7 +58,6 @@ def cmd_plan(args) -> int:
     If plan_file is provided, uses that name; otherwise Claude suggests one.
     """
     import sys
-    import os
 
     plan_file = args.plan_file if hasattr(args, "plan_file") and args.plan_file else None
 
@@ -69,7 +74,7 @@ def cmd_plan(args) -> int:
         print("Error: No input provided.")
         return 1
 
-    print(f"Generating plan with Claude ultrathink...")
+    print("Generating plan with Claude ultrathink...")
     print()
 
     # Check if updating existing file

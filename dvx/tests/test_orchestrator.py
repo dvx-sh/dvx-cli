@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from orchestrator import parse_review_result, parse_decisions
+from orchestrator import parse_decisions, parse_escalation_result, parse_review_result
 
 
 class TestParseReviewResult:
@@ -153,6 +153,48 @@ class TestParseReviewResult:
         output = "Some review text here."
         result = parse_review_result(output)
         assert result["suggestions"] == output
+
+
+class TestParseEscalationResult:
+    """Tests for parse_escalation_result."""
+
+    def test_proceed_marker(self):
+        """[PROCEED] marker should set proceed=True."""
+        result = parse_escalation_result("[PROCEED]\n\n## Analysis\nIssue resolved.")
+        assert result["proceed"] is True
+        assert result["escalate"] is False
+
+    def test_escalate_marker(self):
+        """[ESCALATE] marker should set escalate=True."""
+        result = parse_escalation_result("[ESCALATE]\n\n## Why Escalation Required\nNeed human input.")
+        assert result["proceed"] is False
+        assert result["escalate"] is True
+
+    def test_escalate_overrides_proceed(self):
+        """If both markers present, escalate takes precedence."""
+        result = parse_escalation_result("[PROCEED]\n[ESCALATE]\nConfused output")
+        assert result["proceed"] is False
+        assert result["escalate"] is True
+
+    def test_no_markers(self):
+        """No markers should default to not proceed, not escalate."""
+        result = parse_escalation_result("Some analysis without clear decision.")
+        assert result["proceed"] is False
+        assert result["escalate"] is False
+
+    def test_case_insensitive(self):
+        """Markers should be case insensitive."""
+        result = parse_escalation_result("[proceed]\nProceeding with fix.")
+        assert result["proceed"] is True
+
+        result = parse_escalation_result("[ESCALATE]\nNeed help.")
+        assert result["escalate"] is True
+
+    def test_output_preserved(self):
+        """Full output should be preserved in result."""
+        output = "[PROCEED]\n\nFull analysis here."
+        result = parse_escalation_result(output)
+        assert result["output"] == output
 
 
 class TestParseDecisions:

@@ -5,13 +5,13 @@ Manages the .dvx/ directory in each project for tracking orchestration state.
 """
 
 import json
+import logging
 import os
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Optional
-import logging
 
 logger = logging.getLogger(__name__)
 

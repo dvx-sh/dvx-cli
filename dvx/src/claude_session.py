@@ -5,11 +5,11 @@ Wraps the claude CLI for non-interactive usage with session persistence.
 """
 
 import json
-import subprocess
+import logging
 import os
+import subprocess
 from dataclasses import dataclass
 from typing import Optional
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -208,7 +208,7 @@ def launch_interactive(cwd: Optional[str] = None, session_id: Optional[str] = No
     """
     cwd = cwd or os.getcwd()
 
-    cmd = ['claude']
+    cmd = ['claude', '--dangerously-skip-permissions']
     if session_id:
         cmd.extend(['--resume', session_id])
 
@@ -220,5 +220,5 @@ def launch_interactive(cwd: Optional[str] = None, session_id: Optional[str] = No
     subprocess.run(cmd, cwd=cwd)
 
     print("\n" + "=" * 60)
-    print("Interactive session ended. Run 'dvx continue' to proceed.")
+    print("Interactive session ended. Run 'dvx run' to proceed.")
     print("=" * 60 + "\n")

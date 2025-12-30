@@ -60,8 +60,9 @@ echo "    pip install -e \".[automation]\" # invoke, fabric"
 echo "    pip install -e \".[ai]\"         # anthropic"
 echo
 echo "Usage:"
-echo "    dvx start PLAN-feature.md   # Start processing a plan"
-echo "    dvx status                   # Check current status"
-echo "    dvx continue                 # Resume after human input"
-echo "    dvx decisions                # Review decisions made"
+echo "    dvx plan PLAN.md    # Generate a plan file with Claude"
+echo "    dvx run PLAN.md     # Run orchestration on a plan"
+echo "    dvx status          # Check current status"
+echo "    dvx decisions       # Show decisions made"
+echo "    dvx clean           # Delete .dvx/ directory"
 echo

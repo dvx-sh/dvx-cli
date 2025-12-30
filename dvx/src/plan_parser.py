@@ -5,13 +5,13 @@ Uses Claude Code to understand any plan format and extract tasks.
 Status is tracked separately to avoid modifying the plan file.
 """
 
-import json
 import hashlib
+import json
+import logging
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Optional
-import logging
 
 from claude_session import run_claude
 

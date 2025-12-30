@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from claude_session import _parse_output, SessionResult
+from claude_session import SessionResult, _parse_output
 
 
 class TestParseOutput:

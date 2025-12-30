@@ -3,7 +3,7 @@
 import tempfile
 from pathlib import Path
 
-from plan_parser import parse_plan, get_next_pending_task, TaskStatus
+from plan_parser import TaskStatus, get_next_pending_task, parse_plan
 
 
 def test_parse_checkbox_tasks():
