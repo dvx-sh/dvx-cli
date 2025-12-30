@@ -1,0 +1,28 @@
+#!/bin/bash
+# Set up development environment for dvx
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$SCRIPT_DIR"
+
+echo "Setting up dvx development environment..."
+
+if [ -d ".venv" ]; then
+    echo "Virtual environment already exists"
+else
+    echo "Creating virtual environment..."
+    python3 -m venv .venv
+fi
+
+echo "Installing dev dependencies..."
+.venv/bin/pip install -e ".[dev]" -q
+
+echo
+echo "Done! Activate with:"
+echo "  source .venv/bin/activate"
+echo
+echo "Then run:"
+echo "  invoke tests    # run tests"
+echo "  invoke lint     # run linter"
+echo "  invoke check    # lint + tests"
