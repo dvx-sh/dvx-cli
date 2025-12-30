@@ -1,11 +1,21 @@
 """Tests for plan_parser module."""
 
+import shutil
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from plan_parser import TaskStatus, get_next_pending_task, parse_plan
 
+# Skip tests that require Claude CLI if it's not available
+requires_claude = pytest.mark.skipif(
+    shutil.which("claude") is None,
+    reason="Claude CLI not available"
+)
 
+
+@requires_claude
 def test_parse_checkbox_tasks():
     """Test parsing checkbox-style tasks."""
     content = """# Test Plan
@@ -39,6 +49,7 @@ def test_parse_checkbox_tasks():
         Path(f.name).unlink()
 
 
+@requires_claude
 def test_get_next_pending_task():
     """Test getting the next pending task."""
     content = """# Test Plan
