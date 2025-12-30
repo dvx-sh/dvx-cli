@@ -320,9 +320,18 @@ def run_oneshot(prompt: str, cwd: Optional[str] = None) -> SessionResult:
     return run_claude(prompt, cwd=cwd, session_id=None)
 
 
-def launch_interactive(cwd: Optional[str] = None, session_id: Optional[str] = None) -> None:
+def launch_interactive(
+    cwd: Optional[str] = None,
+    session_id: Optional[str] = None,
+    initial_prompt: Optional[str] = None,
+) -> None:
     """
     Launch Claude Code in interactive mode for human intervention.
+
+    Args:
+        cwd: Working directory
+        session_id: Optional session ID to resume (use None for fresh session)
+        initial_prompt: Optional prompt to start the session with
 
     This blocks until the user exits the session.
     """
@@ -331,6 +340,8 @@ def launch_interactive(cwd: Optional[str] = None, session_id: Optional[str] = No
     cmd = ['claude', '--dangerously-skip-permissions']
     if session_id:
         cmd.extend(['--resume', session_id])
+    if initial_prompt:
+        cmd.extend(['-p', initial_prompt])
 
     logger.info("Launching interactive Claude session...")
     print("\n" + "=" * 60)

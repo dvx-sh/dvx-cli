@@ -287,12 +287,14 @@ def cmd_run(args) -> int:
         print()
 
         blocked_file = get_dvx_dir(plan_file) / "blocked-context.md"
+        blocked_context = ""
         if blocked_file.exists():
+            blocked_context = blocked_file.read_text()
             print("Blocked context:")
             print("-" * 40)
-            lines = blocked_file.read_text().split('\n')[:15]
+            lines = blocked_context.split('\n')[:15]
             print('\n'.join(lines))
-            if len(blocked_file.read_text().split('\n')) > 15:
+            if len(blocked_context.split('\n')) > 15:
                 print("...")
             print("-" * 40)
             print()
@@ -301,7 +303,29 @@ def cmd_run(args) -> int:
         print("Type /exit when done to return to dvx.")
         print()
 
-        launch_interactive(session_id=state.overseer_session_id)
+        # Start a FRESH session with just the blocked context (not the accumulated overseer session)
+        # This avoids context bloat from previous tasks
+        initial_prompt = f"""You are helping resolve a blocked dvx orchestration.
+
+## Current Task
+
+**Task {state.current_task_id}**: {state.current_task_title}
+
+## Plan File
+
+{state.plan_file}
+
+## Issue
+
+{blocked_context}
+
+## Instructions
+
+1. Read the plan file to understand the task context
+2. Investigate and resolve the issue described above
+3. When resolved, type /exit to return to dvx orchestration
+"""
+        launch_interactive(initial_prompt=initial_prompt)
 
         print()
         print("Interactive session ended.")
