@@ -324,6 +324,8 @@ def launch_interactive(
     cwd: Optional[str] = None,
     session_id: Optional[str] = None,
     initial_prompt: Optional[str] = None,
+    plan_file: Optional[str] = None,
+    auto_explain: bool = True,
 ) -> None:
     """
     Launch Claude Code in interactive mode for human intervention.
@@ -332,6 +334,8 @@ def launch_interactive(
         cwd: Working directory
         session_id: Optional session ID to resume (use None for fresh session)
         initial_prompt: Optional prompt to start the session with
+        plan_file: Optional plan file path for resume instructions
+        auto_explain: If True, Claude will immediately explain the blocking reason
 
     This blocks until the user exits the session.
     """
@@ -341,15 +345,25 @@ def launch_interactive(
     if session_id:
         cmd.extend(['--resume', session_id])
     if initial_prompt:
-        cmd.extend(['-p', initial_prompt])
+        # Use --append-system-prompt to provide context while keeping session interactive
+        cmd.extend(['--append-system-prompt', initial_prompt])
+
+    # If auto_explain, pass an initial prompt to trigger immediate explanation
+    if auto_explain and initial_prompt:
+        cmd.append('Explain the blocking reason and what needs to be done.')
 
     logger.info("Launching interactive Claude session...")
     print("\n" + "=" * 60)
-    print("INTERACTIVE SESSION - Resolve the issue, then type /exit")
-    print("=" * 60 + "\n")
+    print("INTERACTIVE SESSION - Type /exit when done")
+    print("=" * 60)
+    print("Resolve the blocking issue below. Confirm your fix works")
+    print("(run tests, check output, etc.) before exiting.\n")
 
     subprocess.run(cmd, cwd=cwd)
 
     print("\n" + "=" * 60)
-    print("Interactive session ended. Run 'dvx run' to proceed.")
+    if plan_file:
+        print(f"Interactive session ended. Run 'dvx run {plan_file}' to proceed.")
+    else:
+        print("Interactive session ended.")
     print("=" * 60 + "\n")

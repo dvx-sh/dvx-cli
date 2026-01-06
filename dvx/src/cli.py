@@ -280,7 +280,7 @@ def cmd_run(args) -> int:
     state = load_state(plan_file)
     step_mode = args.step
 
-    # Handle blocked state immediately (no sync needed)
+    # Handle blocked state - launch interactive session to resolve
     if state is not None and state.phase == Phase.BLOCKED.value:
         print(f"Resuming blocked orchestration: {state.plan_file}")
         print(f"Current task: {state.current_task_id} - {state.current_task_title}")
@@ -321,11 +321,23 @@ def cmd_run(args) -> int:
 
 ## Instructions
 
-1. Read the plan file to understand the task context
-2. Investigate and resolve the issue described above
-3. When resolved, type /exit to return to dvx orchestration
+When explaining the blocking reason:
+1. Summarize WHY this was blocked (1-2 sentences)
+2. List the specific issues that need to be addressed
+3. Ask if the user wants you to start fixing them
+
+After explaining, wait for user direction before taking action.
+
+## IMPORTANT: Before User Types /exit
+
+When the user indicates the task is complete (or before they type /exit):
+1. **Update the plan file**: Mark the task as complete with [x] or ✅
+2. **Commit changes**: Stage and commit all changes for this task
+3. Confirm to the user that the task is marked complete
+
+This ensures dvx knows to move to the next task instead of re-implementing this one.
 """
-        launch_interactive(initial_prompt=initial_prompt)
+        launch_interactive(initial_prompt=initial_prompt, plan_file=plan_file)
 
         print()
         print("Interactive session ended.")
@@ -333,6 +345,14 @@ def cmd_run(args) -> int:
         print()
 
         clear_blocked(plan_file)
+
+        # Sync state with plan file BEFORE continuing orchestration
+        # The interactive session may have completed the task and updated the plan
+        print(f"Syncing plan state: {plan_file}")
+        sync_result = sync_plan_state(plan_file)
+        if sync_result['synced'] > 0 or sync_result['added'] > 0:
+            print(f"  Updated: {sync_result['synced']} synced, {sync_result['added']} added from plan markers")
+
         return run_orchestrator(state.plan_file, step_mode=state.step_mode)
 
     # === PLANNER: Sync state with plan file ===
