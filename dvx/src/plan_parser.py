@@ -55,21 +55,22 @@ def _get_status_file() -> Path:
     return Path(STATUS_FILE)
 
 
-def _load_status_overrides() -> dict[str, str]:
-    """Load status overrides from the tracking file."""
+def _load_status_overrides(plan_filepath: Path) -> dict[str, str]:
+    """Load status overrides from the tracking file for a specific plan."""
     status_file = _get_status_file()
     if not status_file.exists():
         return {}
     try:
         data = json.loads(status_file.read_text())
-        return data.get('status', {})
+        plan_key = plan_filepath.name
+        return data.get(plan_key, {})
     except Exception as e:
         logger.warning(f"Failed to load status file: {e}")
         return {}
 
 
-def _save_status_override(task_id: str, status: TaskStatus) -> None:
-    """Save a status override to the tracking file."""
+def _save_status_override(plan_filepath: Path, task_id: str, status: TaskStatus) -> None:
+    """Save a status override to the tracking file for a specific plan."""
     status_file = _get_status_file()
 
     # Ensure .dvx directory exists
@@ -84,12 +85,13 @@ def _save_status_override(task_id: str, status: TaskStatus) -> None:
     else:
         data = {}
 
-    if 'status' not in data:
-        data['status'] = {}
+    plan_key = plan_filepath.name
+    if plan_key not in data:
+        data[plan_key] = {}
 
-    data['status'][task_id] = status.value
+    data[plan_key][task_id] = status.value
     status_file.write_text(json.dumps(data, indent=2))
-    logger.debug(f"Saved status override: {task_id} -> {status.value}")
+    logger.debug(f"Saved status override: {plan_key}:{task_id} -> {status.value}")
 
 
 def _load_from_cache(filepath: Path) -> Optional[list[Task]]:
@@ -219,7 +221,7 @@ Important:
     return tasks
 
 
-def _apply_status_overrides(tasks: list[Task]) -> list[Task]:
+def _apply_status_overrides(tasks: list[Task], plan_filepath: Path) -> list[Task]:
     """
     Apply status overrides from tracking file to tasks.
 
@@ -231,7 +233,7 @@ def _apply_status_overrides(tasks: list[Task]) -> list[Task]:
     mistakenly marks unimplemented tasks as "done" (e.g., by misinterpreting
     [x] markers in the plan file).
     """
-    overrides = _load_status_overrides()
+    overrides = _load_status_overrides(plan_filepath)
 
     for task in tasks:
         if task.id in overrides:
@@ -264,7 +266,7 @@ def parse_plan(filepath: str | Path) -> list[Task]:
     cached = _load_from_cache(filepath)
     if cached is not None:
         logger.info(f"Using cached parse: {len(cached)} tasks from {filepath}")
-        return _apply_status_overrides(cached)
+        return _apply_status_overrides(cached, filepath)
 
     # Parse with Claude
     tasks = _parse_with_claude(filepath)
@@ -273,7 +275,7 @@ def parse_plan(filepath: str | Path) -> list[Task]:
     _save_to_cache(filepath, tasks)
 
     # Apply any status overrides
-    return _apply_status_overrides(tasks)
+    return _apply_status_overrides(tasks, filepath)
 
 
 def get_next_pending_task(filepath: str | Path) -> Optional[Task]:
@@ -300,7 +302,8 @@ def update_task_status(filepath: str | Path, task_id: str, new_status: TaskStatu
     Status is tracked in a separate file (.dvx/task-status.json) rather than
     modifying the plan file, for speed and simplicity.
     """
-    _save_status_override(task_id, new_status)
+    filepath = Path(filepath)
+    _save_status_override(filepath, task_id, new_status)
     logger.info(f"Updated task {task_id} to {new_status.value}")
 
 
@@ -336,10 +339,10 @@ def clear_status() -> None:
 
 def clear_status_for_plan(filepath: str | Path) -> None:
     """
-    Clear status overrides for tasks in a specific plan.
+    Clear status overrides for a specific plan.
 
-    This removes only the task IDs that belong to this plan,
-    leaving other plan's task statuses intact.
+    Simply removes this plan's entry from the status file,
+    leaving other plans' statuses intact.
     """
     filepath = Path(filepath)
     status_file = _get_status_file()
@@ -347,39 +350,15 @@ def clear_status_for_plan(filepath: str | Path) -> None:
     if not status_file.exists():
         return
 
-    # Get the task IDs from this plan
-    # We need to parse without cache to get task IDs
     try:
-        # Clear the cache for this plan first
-        cache_path = _get_cache_path(filepath)
-        if cache_path.exists():
-            cache_path.unlink()
-            logger.debug(f"Cleared cache for {filepath}")
-
-        # Parse to get task IDs (this will use Claude since cache is cleared)
-        tasks = _parse_with_claude(filepath)
-        task_ids = {t.id for t in tasks}
-
-        # Load current status and remove only this plan's tasks
-        try:
-            data = json.loads(status_file.read_text())
-            statuses = data.get('status', {})
-
-            # Remove tasks from this plan
-            for task_id in list(statuses.keys()):
-                if task_id in task_ids:
-                    del statuses[task_id]
-
-            data['status'] = statuses
+        data = json.loads(status_file.read_text())
+        plan_key = filepath.name
+        if plan_key in data:
+            del data[plan_key]
             status_file.write_text(json.dumps(data, indent=2))
-            logger.info(f"Cleared {len(task_ids)} task statuses for {filepath}")
-        except Exception as e:
-            logger.warning(f"Failed to clear plan statuses: {e}")
-
+            logger.info(f"Cleared status for {plan_key}")
     except Exception as e:
-        logger.warning(f"Failed to parse plan for status clearing: {e}")
-        # Fall back to clearing all statuses
-        clear_status()
+        logger.warning(f"Failed to clear plan status: {e}")
 
 
 def sync_plan_state(filepath: str | Path) -> dict:
@@ -413,8 +392,8 @@ def sync_plan_state(filepath: str | Path) -> dict:
     # Save to cache for future use
     _save_to_cache(filepath, tasks)
 
-    # Load current status overrides
-    current_statuses = _load_status_overrides()
+    # Load current status overrides for this plan
+    current_statuses = _load_status_overrides(filepath)
 
     # Sync: Update status file to match what Claude parsed from plan
     synced = 0
@@ -429,7 +408,7 @@ def sync_plan_state(filepath: str | Path) -> dict:
         # If Claude found [x] (done) in the plan but we have pending/in_progress
         if task.status == TaskStatus.DONE:
             if current != TaskStatus.DONE.value:
-                _save_status_override(task.id, TaskStatus.DONE)
+                _save_status_override(filepath, task.id, TaskStatus.DONE)
                 if current is None:
                     added += 1
                     logger.info(f"Added done status for task {task.id} from plan markers")
@@ -440,7 +419,7 @@ def sync_plan_state(filepath: str | Path) -> dict:
         # If Claude found [ ] (pending) and we have done, trust the plan
         elif task.status == TaskStatus.PENDING:
             if current == TaskStatus.DONE.value:
-                _save_status_override(task.id, TaskStatus.PENDING)
+                _save_status_override(filepath, task.id, TaskStatus.PENDING)
                 synced += 1
                 logger.info(f"Synced task {task.id} to pending (was done)")
 
@@ -450,13 +429,13 @@ def sync_plan_state(filepath: str | Path) -> dict:
     for task_id in list(current_statuses.keys()):
         if task_id not in task_ids:
             # Task was removed from plan - clean up status
-            # Load, modify, save
             status_file = _get_status_file()
             if status_file.exists():
                 try:
                     data = json.loads(status_file.read_text())
-                    if task_id in data.get('status', {}):
-                        del data['status'][task_id]
+                    plan_key = filepath.name
+                    if plan_key in data and task_id in data[plan_key]:
+                        del data[plan_key][task_id]
                         status_file.write_text(json.dumps(data, indent=2))
                         removed += 1
                         logger.info(f"Removed status for deleted task {task_id}")

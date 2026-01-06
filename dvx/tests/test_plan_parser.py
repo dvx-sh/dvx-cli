@@ -64,7 +64,7 @@ def test_parse_checkbox_tasks():
 
             # Now mark task 1.2 as DONE in the status tracking file
             Path(".dvx").mkdir(exist_ok=True)
-            _save_status_override("1.2", TaskStatus.DONE)
+            _save_status_override(plan_file, "1.2", TaskStatus.DONE)
 
             # Re-parse and verify the override is applied
             tasks = parse_plan(str(plan_file))
@@ -104,7 +104,7 @@ def test_get_next_pending_task():
 
             # Mark task 1 as DONE in the status tracking file
             Path(".dvx").mkdir(exist_ok=True)
-            _save_status_override("1", TaskStatus.DONE)
+            _save_status_override(plan_file, "1", TaskStatus.DONE)
 
             # Now the next pending task should be task 2
             task = get_next_pending_task(str(plan_file))

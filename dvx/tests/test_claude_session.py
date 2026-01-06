@@ -53,6 +53,10 @@ class TestStatusOverridesTruth:
             os.chdir(tmpdir)
 
             try:
+                # Create a fake plan file for namespacing
+                plan_file = Path(tmpdir) / "PLAN-test.md"
+                plan_file.write_text("# Test Plan")
+
                 # Simulate: cache has 5 tasks, ALL marked as "done" by Claude's parsing
                 # (This happens when Claude sees [x] markers and marks tasks done)
                 cached_tasks = [
@@ -66,11 +70,11 @@ class TestStatusOverridesTruth:
                 # But the status tracking file only has tasks 1-2 marked as done
                 # (because only tasks 1-2 were actually implemented)
                 Path(".dvx").mkdir(exist_ok=True)
-                _save_status_override("1", TaskStatus.DONE)
-                _save_status_override("2", TaskStatus.DONE)
+                _save_status_override(plan_file, "1", TaskStatus.DONE)
+                _save_status_override(plan_file, "2", TaskStatus.DONE)
 
                 # Apply status overrides
-                result_tasks = _apply_status_overrides(cached_tasks)
+                result_tasks = _apply_status_overrides(cached_tasks, plan_file)
 
                 # BUG: Tasks 3-5 are NOT in overrides, so they keep cached "done" status
                 # FIX: Tasks NOT in overrides should be PENDING
