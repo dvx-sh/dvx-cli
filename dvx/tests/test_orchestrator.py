@@ -58,11 +58,11 @@ class TestParseReviewResult:
         result = parse_review_result("I recommend adding error handling.")
         assert result["has_issues"] is True
 
-    def test_approved_overridden_by_issues(self):
-        """Approval should be overridden if issues are present."""
+    def test_explicit_approved_overrides_heuristic_issues(self):
+        """Explicit [APPROVED] overrides heuristic issue detection like 'should be'."""
         result = parse_review_result("[APPROVED] but you should be careful about X")
-        assert result["approved"] is False
-        assert result["has_issues"] is True
+        assert result["approved"] is True
+        assert result["has_issues"] is False  # Heuristic ignored with explicit approval
 
     # === MISSING TESTS ===
 
@@ -109,32 +109,33 @@ class TestParseReviewResult:
         result = parse_review_result("This has a security vulnerability.")
         assert result["critical"] is True
 
-    # === FALSE POSITIVE TESTS (documenting current behavior) ===
+    # === FALSE POSITIVE AVOIDANCE TESTS ===
+    # These tests verify the implementation correctly avoids false positives
 
-    def test_false_positive_no_security_issues(self):
-        """CURRENT BEHAVIOR: 'no security issues' still triggers critical.
+    def test_no_false_positive_security_positive_mention(self):
+        """'security' in positive context should NOT trigger critical.
 
-        This documents the false positive - 'security' anywhere triggers it.
+        Only specific phrases like 'security vulnerability' trigger critical.
         """
         result = parse_review_result("I checked and there are no security issues.")
-        # This is a FALSE POSITIVE - current behavior triggers on 'security'
-        assert result["critical"] is True
+        assert result["critical"] is False
 
-    def test_false_positive_security_is_good(self):
-        """CURRENT BEHAVIOR: 'security is good' triggers critical."""
+    def test_no_false_positive_security_is_good(self):
+        """'security is good' should NOT trigger critical."""
         result = parse_review_result("The security is good here.")
-        assert result["critical"] is True
+        assert result["critical"] is False
 
-    def test_false_positive_consider_in_description(self):
-        """CURRENT BEHAVIOR: 'consider' in any context triggers issues."""
+    def test_heuristic_consider_without_approval(self):
+        """'consider' triggers issues when there's no explicit approval."""
         result = parse_review_result("I will consider this approved. Great work!")
         assert result["has_issues"] is True
-        # Even though intent was to approve, 'consider' triggers issues
+        # Without [APPROVED], heuristic detection still applies
 
-    def test_false_positive_should_be_in_positive(self):
-        """CURRENT BEHAVIOR: 'should be' in any context triggers issues."""
+    def test_no_false_positive_should_be_with_approval(self):
+        """'should be' with explicit [APPROVED] should NOT trigger issues."""
         result = parse_review_result("This should be easy to merge. [APPROVED]")
-        assert result["has_issues"] is True
+        assert result["has_issues"] is False  # Explicit approval overrides heuristic
+        assert result["approved"] is True
 
     # === EDGE CASES ===
 

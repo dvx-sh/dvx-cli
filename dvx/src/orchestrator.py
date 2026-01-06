@@ -91,17 +91,141 @@ def load_prompt(name: str) -> str:
     return prompt_file.read_text()
 
 
-def get_git_diff() -> str:
-    """Get the current git diff for review."""
+def get_change_stats() -> dict:
+    """
+    Get statistics about the current git changes.
+
+    Returns dict with:
+        - files_changed: int
+        - files_deleted: int
+        - files_added: int
+        - insertions: int
+        - deletions: int
+        - is_massive: bool - True if changes exceed thresholds for human review
+    """
+    stats = {
+        'files_changed': 0,
+        'files_deleted': 0,
+        'files_added': 0,
+        'insertions': 0,
+        'deletions': 0,
+        'is_massive': False,
+        'summary': '',
+    }
+
     try:
-        # Get staged and unstaged changes
+        # Get file counts by status
         result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        for line in result.stdout.strip().split('\n'):
+            if not line:
+                continue
+            status = line[:2].strip()
+            if status == 'D':
+                stats['files_deleted'] += 1
+            elif status == '??':
+                stats['files_added'] += 1
+            stats['files_changed'] += 1
+
+        # Get line counts
+        result = subprocess.run(
+            ["git", "diff", "--stat", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        stats['summary'] = result.stdout
+
+        # Parse the summary line (e.g., "52 files changed, 124 insertions(+), 19810 deletions(-)")
+        lines = result.stdout.strip().split('\n')
+        if lines:
+            summary_line = lines[-1]
+            import re
+            ins_match = re.search(r'(\d+) insertion', summary_line)
+            del_match = re.search(r'(\d+) deletion', summary_line)
+            if ins_match:
+                stats['insertions'] = int(ins_match.group(1))
+            if del_match:
+                stats['deletions'] = int(del_match.group(1))
+
+        # Determine if this is a "massive" change requiring human review
+        #
+        # We're permissive about additions and refactoring, but cautious about deletions:
+        # - Large additions (50k+ lines): Fine, new code being added
+        # - Even changes (50k added, 35k deleted): Fine, likely refactoring
+        # - Large deletions without additions: Concerning, significant code removal
+        #
+        # Thresholds:
+        # - >20 files deleted: Always flag (significant structural change)
+        # - Deletions > 10x insertions AND >2000 deletions: Flag (mass deletion)
+        #
+        insertions = stats['insertions'] or 1  # Avoid division by zero
+        deletions = stats['deletions']
+        deletion_ratio = deletions / insertions
+
+        is_mass_deletion = (
+            deletions > 2000 and
+            deletion_ratio > 10
+        )
+        is_many_files_deleted = stats['files_deleted'] > 20
+
+        if is_mass_deletion or is_many_files_deleted:
+            stats['is_massive'] = True
+            if is_mass_deletion:
+                logger.info(f"Detected mass deletion: {deletions:,} deletions vs {stats['insertions']:,} insertions "
+                           f"({deletion_ratio:.1f}x ratio)")
+            if is_many_files_deleted:
+                logger.info(f"Detected many files deleted: {stats['files_deleted']} files")
+
+    except Exception as e:
+        logger.error(f"Error getting change stats: {e}")
+
+    return stats
+
+
+def get_git_diff(max_size: int = 15000) -> str:
+    """
+    Get the current git diff for review.
+
+    Args:
+        max_size: Maximum diff size in characters. If exceeded, uses --stat summary only.
+                  Default 15KB to leave room for prompt template and plan file.
+    """
+    try:
+        # Always get the stat summary first (it's small and useful)
+        stat_result = subprocess.run(
+            ["git", "diff", "--stat", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        stat_summary = stat_result.stdout
+
+        # Check diff size before loading full content
+        size_result = subprocess.run(
             ["git", "diff", "HEAD"],
             capture_output=True,
             text=True,
             timeout=30,
         )
-        diff = result.stdout
+        diff = size_result.stdout
+        diff_size = len(diff)
+
+        # For large diffs, only use stat summary
+        if diff_size > max_size:
+            logger.info(f"Diff too large ({diff_size:,} chars), using --stat summary only")
+            diff = (
+                f"[Diff too large ({diff_size:,} chars) - showing summary only]\n\n"
+                f"{stat_summary}\n"
+                f"[Reviewer: Focus on verifying build/tests pass. Use `git diff HEAD` for details if needed.]"
+            )
+        else:
+            # Include stat summary at top for context, then full diff
+            diff = f"Summary:\n{stat_summary}\n\nFull diff:\n{diff}"
 
         # Also get untracked files
         result = subprocess.run(
@@ -181,21 +305,26 @@ def parse_review_result(output: str) -> dict:
     """
     output_lower = output.lower()
 
-    # Check for approval
-    approved = (
-        "[approved]" in output_lower or
+    # Check for explicit approval signal - takes precedence over heuristic issue detection
+    explicit_approved = "[approved]" in output_lower
+    heuristic_approved = (
         "lgtm" in output_lower or
         "looks good" in output_lower
     )
 
-    # Check for issues
-    has_issues = (
+    # Check for explicit issues signal
+    explicit_issues = (
         "[issues]" in output_lower or
-        "[suggestions]" in output_lower or
+        "[suggestions]" in output_lower
+    )
+    # Heuristic issue detection - only used when no explicit approval
+    heuristic_issues = (
         "should be" in output_lower or
         "consider" in output_lower or
         "recommend" in output_lower
     )
+    # has_issues is true if explicit, or if heuristic AND no explicit approval
+    has_issues = explicit_issues or (heuristic_issues and not explicit_approved)
 
     # Check for missing tests
     missing_tests = (
@@ -206,15 +335,26 @@ def parse_review_result(output: str) -> dict:
     )
 
     # Check for critical issues
+    # Note: Avoid broad matches like "security" which trigger on positive mentions
+    # e.g., "Security: ✅ Tenant scope enforced..." should not be flagged
     critical = (
         "[critical]" in output_lower or
         "[blocked]" in output_lower or
         "critical issue" in output_lower or
-        "security" in output_lower
+        "security vulnerability" in output_lower or
+        "security risk" in output_lower or
+        "security flaw" in output_lower
+    )
+
+    # Explicit approval overrides heuristic issues (but not critical)
+    # Heuristic approval requires no issues and no critical
+    approved = (
+        (explicit_approved and not critical) or
+        (heuristic_approved and not has_issues and not critical)
     )
 
     return {
-        "approved": approved and not has_issues and not critical,
+        "approved": approved,
         "has_issues": has_issues,
         "missing_tests": missing_tests,
         "suggestions": output,  # Full output as suggestions
@@ -282,6 +422,34 @@ def parse_escalation_result(output: str) -> dict:
         "escalate": escalate,
         "output": output,
     }
+
+
+def build_trigger_context(result: SessionResult, fallback_context: str = "") -> str:
+    """
+    Build context for a trigger, ensuring we capture error details.
+
+    When a session fails, the output may be empty but block_reason has the error.
+    This ensures the actual error is visible in blocked context.
+
+    Args:
+        result: The SessionResult from a failed session
+        fallback_context: Optional fallback context if both output and block_reason are empty
+    """
+    context_parts = []
+
+    # Include output if present
+    if result.output and result.output.strip():
+        context_parts.append(result.output.strip())
+
+    # Include block_reason if present (this is where "Prompt is too long" would be)
+    if result.block_reason:
+        context_parts.append(f"\n**Error**: {result.block_reason}")
+
+    # If we have nothing, use fallback
+    if not context_parts:
+        return fallback_context or "(No output or error captured)"
+
+    return "\n".join(context_parts)
 
 
 def is_already_complete(output: str) -> bool:
@@ -591,9 +759,19 @@ def run_implementer_commit(task: Task, plan_file: str) -> SessionResult:
     prompt = f"""The implementation for task {task.id} ({task.title}) has been reviewed and approved.
 
 Please:
-1. Update the plan file ({plan_file}) to mark task {task.id} as complete (change [ ] to [x])
-2. Stage ONLY files you modified for this task
-3. Create a commit with a meaningful message explaining why these changes were made
+1. Review the codebase changes you made for this task
+2. Update the plan file ({plan_file}):
+   - Mark task {task.id} as complete (change [ ] to [x])
+   - Add any notes or context that would help a NEW session understand what was done
+   - If implementation details differ from the original plan, update the task description
+   - Ensure future tasks have enough context to continue without your session history
+3. Stage ONLY files you modified for this task
+4. Create a commit with a meaningful message explaining why these changes were made
+
+IMPORTANT - Session continuity:
+- A completely new Claude session will pick up the next task
+- That session will ONLY have the plan file for context - not your conversation history
+- Make sure the plan file captures any decisions, patterns, or context needed to continue
 
 IMPORTANT - Multiple sessions may be running in this project:
 - Other dvx sessions may be working on different plans concurrently
@@ -655,7 +833,7 @@ def run_orchestrator(plan_file: str, step_mode: bool = False) -> int:
         return _run_orchestrator_inner(plan_file, step_mode)
     except KeyboardInterrupt:
         logger.info("Interrupted by user")
-        print("\nInterrupted. Run 'dvx continue' to resume.")
+        print(f"\nInterrupted. Run 'dvx run {plan_file}' to resume.")
         return 1
     except FileNotFoundError as e:
         logger.error(f"File not found: {e}")
@@ -715,7 +893,7 @@ def _run_finalization(plan_file: str, state: State) -> int:
                 Task(id="finalizer", title="Final review", description="", status=TaskStatus.DONE),
                 "finalizer",
                 f"Finalizer failed: {finalizer_result.block_reason or 'unknown error'}",
-                finalizer_result.output,
+                build_trigger_context(finalizer_result),
                 session_id=finalizer_result.session_id,
             )
             if not should_continue:
@@ -743,7 +921,7 @@ def _run_finalization(plan_file: str, state: State) -> int:
                     Task(id="finalizer-fix", title="Fix finalizer issues", description="", status=TaskStatus.IN_PROGRESS),
                     "implementer",
                     reason,
-                    fix_result.output,
+                    build_trigger_context(fix_result),
                     session_id=fix_result.session_id,
                 )
                 if not should_continue:
@@ -866,7 +1044,7 @@ def _run_orchestrator_inner(plan_file: str, step_mode: bool = False) -> int:
             reason = impl_result.block_reason or ("Implementation failed" if not impl_result.success else "Implementer is blocked")
             should_continue, exit_code = evaluate_trigger(
                 state, task, "implementer", reason,
-                impl_result.output, session_id=impl_result.session_id,
+                build_trigger_context(impl_result), session_id=impl_result.session_id,
             )
             if not should_continue:
                 return exit_code
@@ -875,6 +1053,68 @@ def _run_orchestrator_inner(plan_file: str, step_mode: bool = False) -> int:
         # === REVIEW PHASE ===
         update_phase(Phase.REVIEWING, plan_file)
         logger.info("Reviewing implementation...")
+
+        # Check for massive deletions that require human review
+        change_stats = get_change_stats()
+        if change_stats['is_massive']:
+            insertions = change_stats['insertions']
+            deletions = change_stats['deletions']
+            ratio = deletions / (insertions or 1)
+            print(f"  ⚠️  Large deletion detected: {deletions:,} deletions vs {insertions:,} additions ({ratio:.1f}x)")
+
+            massive_context = f"""## Large Deletion Detected
+
+This task deleted significantly more code than it added, which requires human verification.
+
+### Why This Was Blocked
+
+| Metric | Value |
+|--------|-------|
+| Files deleted | {change_stats['files_deleted']} |
+| Lines added | {insertions:,} |
+| Lines deleted | {deletions:,} |
+| Deletion ratio | {ratio:.1f}x |
+
+> **Policy**: Large additions and refactoring (similar add/delete counts) are auto-approved.
+> Large deletions without corresponding additions require human review to prevent accidental code loss.
+
+### Change Summary
+
+```
+{change_stats['summary']}
+```
+
+### Verification Checklist (Must Complete)
+
+1. [ ] **Deletions match task**: Every deleted file/function is mentioned in the task description
+2. [ ] **No collateral damage**: Only files related to this task were modified
+3. [ ] **Build passes**: `make build` or `go build ./...`
+4. [ ] **Tests pass**: `make test` or `go test ./...`
+
+### Recommendation
+
+Do NOT commit until you've verified the deletions are intentional. If any deleted code seems unrelated to the task, investigate before proceeding.
+
+### Next Steps
+
+Once verified, commit and mark complete:
+```bash
+git add -A
+git commit -m "Task {task.id}: {task.title}"
+
+# Update task status
+cat > .dvx/task-status.json << 'EOF'
+# Edit to mark task {task.id} as "done"
+EOF
+```
+
+Then type `/exit` to continue orchestration.
+"""
+            return handle_blocked(
+                state,
+                f"Large deletion requires human review ({deletions:,} deletions, {ratio:.1f}x ratio)",
+                massive_context,
+            )
 
         review_result, session_id = run_reviewer(
             plan_file,
@@ -888,11 +1128,66 @@ def _run_orchestrator_inner(plan_file: str, step_mode: bool = False) -> int:
         if not review_result.success:
             should_continue, exit_code = evaluate_trigger(
                 state, task, "reviewer", "Review failed",
-                review_result.output, session_id=review_result.session_id,
+                build_trigger_context(review_result), session_id=review_result.session_id,
             )
             if not should_continue:
                 return exit_code
             # Escalater decided to proceed - treat as approved
+
+        # Check if reviewer hit prompt limits
+        if "prompt is too long" in review_result.output.lower():
+            logger.warning("Reviewer hit prompt limit - treating as massive change")
+            change_stats = get_change_stats()
+            total_lines = change_stats['insertions'] + change_stats['deletions']
+
+            overflow_context = f"""## Review Failed: Prompt Too Long
+
+The reviewer could not process this task because the changes are too large for automated review.
+
+### Why This Was Blocked
+
+| Metric | Value |
+|--------|-------|
+| Files changed | {change_stats['files_changed']} |
+| Files deleted | {change_stats['files_deleted']} |
+| Lines changed | {total_lines:,} |
+
+This exceeded the context limit for automated review. Manual verification is required.
+
+### Change Summary
+
+```
+{change_stats['summary']}
+```
+
+### Verification Checklist (Must Complete)
+
+1. [ ] **Changes match task**: Every modification aligns with the task description
+2. [ ] **No unintended changes**: Only files related to this task were modified
+3. [ ] **Build passes**: `make build` or `go build ./...`
+4. [ ] **Tests pass**: `make test` or `go test ./...`
+
+### Recommendation
+
+Review the `git diff --stat` output above. If any files seem unrelated to the task, investigate with `git diff <file>` before committing.
+
+### Next Steps
+
+Once verified, commit and mark complete:
+```bash
+git add -A
+git commit -m "Task {task.id}: {task.title}"
+
+# Update task status to mark task {task.id} as "done"
+```
+
+Then type `/exit` to continue orchestration.
+"""
+            return handle_blocked(
+                state,
+                f"Changes too large for automated review ({change_stats['files_changed']} files)",
+                overflow_context,
+            )
 
         review = parse_review_result(review_result.output)
 
@@ -937,7 +1232,7 @@ def _run_orchestrator_inner(plan_file: str, step_mode: bool = False) -> int:
                 reason = impl_result.block_reason or "Fix implementation failed"
                 should_continue, exit_code = evaluate_trigger(
                     state, task, "implementer", reason,
-                    impl_result.output, session_id=impl_result.session_id,
+                    build_trigger_context(impl_result), session_id=impl_result.session_id,
                 )
                 if not should_continue:
                     return exit_code
@@ -976,7 +1271,7 @@ Run the tests after writing them to ensure they pass.
                 reason = test_result.block_reason or "Test writing failed"
                 should_continue, exit_code = evaluate_trigger(
                     state, task, "implementer", reason,
-                    test_result.output, session_id=test_result.session_id,
+                    build_trigger_context(test_result), session_id=test_result.session_id,
                 )
                 if not should_continue:
                     return exit_code
@@ -992,7 +1287,7 @@ Run the tests after writing them to ensure they pass.
             reason = commit_result.block_reason or "Commit failed"
             should_continue, exit_code = evaluate_trigger(
                 state, task, "implementer", reason,
-                commit_result.output, session_id=commit_result.session_id,
+                build_trigger_context(commit_result), session_id=commit_result.session_id,
             )
             if not should_continue:
                 return exit_code
@@ -1015,7 +1310,7 @@ Run the tests after writing them to ensure they pass.
             print("=" * 60)
             print(f"Task {task.id} ({task.title}) completed and committed.")
             print()
-            print("Review the changes, then run 'dvx continue' for next task.")
+            print(f"Review the changes, then run 'dvx run {plan_file}' for next task.")
             print()
             update_phase(Phase.PAUSED, plan_file)
             return 0  # Exit cleanly to allow review
