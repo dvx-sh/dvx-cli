@@ -55,7 +55,7 @@ The `run` command handles everything automatically:
 1. Write a plan file (any markdown format - dvx uses Claude to parse it)
 2. Run `dvx run PLAN-*.md`
 3. For each task, dvx:
-   - Runs an **implementor** Claude session to write code
+   - Runs an **implementer** Claude session to write code
    - Runs a **reviewer** Claude session to check the work
    - Iterates if issues found (up to 3 times)
    - Commits when approved
