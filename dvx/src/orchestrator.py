@@ -242,6 +242,37 @@ def get_git_diff(max_size: int = 15000) -> str:
         return f"Error getting git diff: {e}"
 
 
+def validate_task_safety(task: Task) -> tuple[bool, str]:
+    """
+    Check if a task contains forbidden operations.
+
+    Returns:
+        (is_safe, warning_message)
+    """
+    task_text = f"{task.title} {task.description}".lower()
+
+    # Forbidden patterns
+    forbidden_patterns = [
+        ("merge to main", "merging to main branch"),
+        ("merge to master", "merging to master branch"),
+        ("push to main", "pushing to main branch"),
+        ("push to master", "pushing to master branch"),
+        ("deploy to", "deployment operations"),
+        ("deploy the", "deployment operations"),
+        ("production deploy", "production deployment"),
+        ("release to", "release operations"),
+        ("merge branch", "branch merging"),
+        ("git merge main", "merging main"),
+        ("git merge master", "merging master"),
+    ]
+
+    for pattern, description in forbidden_patterns:
+        if pattern in task_text:
+            return False, f"Task contains forbidden operation: {description}"
+
+    return True, ""
+
+
 def run_task_splitter(task: Task, plan_file: str) -> SessionResult:
     """
     Analyze a task to determine if it should be split into subtasks.
@@ -1317,11 +1348,24 @@ def _run_orchestrator_inner(plan_file: str, step_mode: bool = False) -> int:
                 logger.warning("No pending tasks but plan not complete - check for blocked tasks")
                 return 1
 
-        # === TASK SPLITTING CHECK ===
-        # Analyze if this task is too complex and should be split
         print()
         print(f"Task {task.id}: {task.title}")
         print("-" * 60)
+
+        # === TASK SAFETY CHECK ===
+        is_safe, safety_warning = validate_task_safety(task)
+        if not is_safe:
+            print(f"  BLOCKED: {safety_warning}")
+            print("  This task contains forbidden operations (merge/deploy).")
+            print("  Skipping - please remove or modify this task manually.")
+            logger.warning(f"Task {task.id} blocked for safety: {safety_warning}")
+
+            # Mark as blocked and continue to next task
+            update_task_status(plan_file, task.id, TaskStatus.BLOCKED)
+            continue
+
+        # === TASK SPLITTING CHECK ===
+        # Analyze if this task is too complex and should be split
         print("  Analyzing task complexity...")
 
         split_result = run_task_splitter(task, plan_file)

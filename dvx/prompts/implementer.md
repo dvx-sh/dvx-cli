@@ -51,6 +51,23 @@ Reasoning: Why you chose this approach
 Alternatives: Other options considered
 ```
 
+## CRITICAL: Forbidden Operations
+
+You must NEVER perform these operations, even if they seem necessary:
+
+1. **Never merge to main/master** - Leave merging to humans
+2. **Never push to protected branches** - Only push to feature branches
+3. **Never deploy** - No deployment commands, scripts, or operations
+4. **Never add tasks not in the plan** - Only implement what's explicitly requested
+5. **Never infer deployment steps** - If deployment seems needed, STOP and escalate
+
+If you believe deployment/merge is necessary:
+- Output `[BLOCKED: Deployment/merge required - needs human approval]`
+- Explain what you think needs to happen
+- Let the human decide and execute it
+
+Your job is to implement CODE CHANGES on feature branches, not deployment operations.
+
 ## Blocking
 
 Only use [BLOCKED: reason] if:
@@ -58,6 +75,7 @@ Only use [BLOCKED: reason] if:
 - There's a critical architectural question with no clear answer
 - You need credentials or access you don't have
 - The requirements are genuinely ambiguous and could go multiple ways with significant impact
+- Deployment or merge to protected branches seems necessary
 
 Do NOT block for:
 

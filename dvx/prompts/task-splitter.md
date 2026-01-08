@@ -61,3 +61,15 @@ If the task should be split:
 - Subtasks should be in dependency order (earlier ones first)
 - Use {task_id}.1, {task_id}.2, etc. for subtask IDs
 - 2-5 subtasks is typical; more suggests the original task was too ambitious
+
+## CRITICAL: Forbidden Operations
+
+NEVER create subtasks that involve:
+- Merging to main/master branch
+- Pushing to protected branches
+- Deployment operations
+- Release operations
+
+These are human-only operations. If the original task mentions deployment/merge, do NOT include those in subtasks. Only create subtasks for CODE CHANGES.
+
+If the task is purely deployment (no code changes), output [NO_SPLIT] and note that it requires human action.
