@@ -494,6 +494,155 @@ def get_branch_info() -> tuple[str, str]:
         return "HEAD", "main"
 
 
+def run_polisher(plan_file: str) -> SessionResult:
+    """
+    Run a holistic polish review of all changes.
+
+    Uses Opus with ultrathink to review the entire implementation
+    and suggest improvements before final approval.
+
+    Args:
+        plan_file: Path to the plan file
+
+    Returns:
+        SessionResult with [POLISHED] or [SUGGESTIONS] decision
+    """
+    logger.info(f"Running polisher for {plan_file}")
+
+    prompt_template = load_prompt("polisher")
+
+    # Get the full diff of all changes
+    git_diff = get_git_diff()
+
+    # Read plan content
+    plan_content = Path(plan_file).read_text()
+
+    prompt = prompt_template.format(
+        plan_file=plan_file,
+        git_diff=git_diff,
+        plan_content=plan_content,
+    )
+
+    # Use Opus with extended thinking for thorough review
+    return run_claude(
+        prompt,
+        model="opus",
+        append_system_prompt="Use extended thinking to review the entire implementation holistically and identify meaningful improvements.",
+    )
+
+
+def parse_polisher_result(output: str) -> dict:
+    """
+    Parse the polisher's output to determine next action.
+
+    Returns dict with:
+        - polished: bool - True if [POLISHED], no suggestions needed
+        - has_suggestions: bool - True if [SUGGESTIONS] found
+        - suggestions: str - Full suggestions text for implementer
+        - output: str - Full output
+    """
+    output_lower = output.lower()
+
+    polished = "[polished]" in output_lower
+    has_suggestions = "[suggestions]" in output_lower
+
+    return {
+        "polished": polished and not has_suggestions,
+        "has_suggestions": has_suggestions,
+        "suggestions": output if has_suggestions else "",
+        "output": output,
+    }
+
+
+def run_polish_fix(suggestions: str, plan_file: str) -> SessionResult:
+    """
+    Run implementer to address polish suggestions.
+
+    Args:
+        suggestions: The polisher's suggestions to address
+        plan_file: Path to the plan file
+
+    Returns:
+        SessionResult from the fix attempt
+    """
+    logger.info("Running implementer to address polish suggestions")
+
+    prompt = f"""The polisher has reviewed all changes and has suggestions for improvement.
+
+## Polisher Suggestions
+
+{suggestions}
+
+## Instructions
+
+### For Quick Wins (Implement Now)
+1. Implement the quick win fixes directly
+2. These should be low-risk, obvious improvements
+3. Run tests after to verify nothing broke
+
+### For Deferred Work (Create FIX Files)
+1. Create a FIX file in `plans/` directory for each deferred item (create directory if needed)
+2. Use this format:
+
+```markdown
+# FIX: [Descriptive Title]
+
+**Priority:** High | Medium | Low
+
+## Problem
+
+[Clear description of what needs fixing and why it matters]
+
+## Solution
+
+[Specific implementation approach]
+
+## Files to Modify
+
+- [ ] path/to/file1 - [what to change]
+- [ ] path/to/file2 - [what to change]
+
+## Notes
+
+[Any context a future session needs]
+```
+
+3. Include enough context that a new session can implement the fix without prior knowledge
+
+### Summary
+- Quick wins: implement now
+- Deferred work: create FIX files to capture the improvements for later
+"""
+
+    return run_claude(prompt)
+
+
+def run_polish_commit() -> SessionResult:
+    """Commit polish improvements (excluding FIX files)."""
+    logger.info("Running polish commit...")
+
+    prompt = """The polish improvements have been applied. Please commit them.
+
+1. Stage modified source files (code changes from quick wins)
+2. DO NOT stage FIX-*.md files in plans/ - leave them uncommitted so the user can review
+3. Create a commit with message: "polish: address review suggestions"
+   - In the commit body, briefly list the improvements made
+   - Focus on the "why" - what was improved and why it matters
+
+Use this format:
+```
+polish: address review suggestions
+
+- Brief description of improvement 1
+- Brief description of improvement 2
+```
+
+IMPORTANT: Leave plans/FIX-*.md files unstaged. The user will review these and decide whether to implement them now or later.
+"""
+
+    return run_claude(prompt)
+
+
 def run_finalizer(plan_file: str) -> SessionResult:
     """
     Run the finalizer to review all changes before merge.
@@ -851,9 +1000,10 @@ def _run_finalization(plan_file: str, state: State) -> int:
     Run the finalization process after all tasks are complete.
 
     This includes:
-    1. Running the finalizer to review all changes
-    2. If issues found, run fix cycles until resolved
-    3. On approval, commit any pending changes and mark complete
+    1. Running the polisher for holistic review and improvements
+    2. Running the finalizer to approve changes for merge
+    3. If issues found, run fix cycles until resolved
+    4. On approval, commit any pending changes and mark complete
 
     The plan file is LEFT IN PLACE so users can review that all tasks were done.
 
@@ -871,10 +1021,80 @@ def _run_finalization(plan_file: str, state: State) -> int:
     print("FINALIZING")
     print("=" * 60)
     print(f"All {summary['total']} tasks completed!")
-    print("Running final review...")
     print()
 
     update_phase(Phase.FINALIZING, plan_file)
+
+    # === POLISH PHASE: Holistic review for improvements ===
+    print("Running polish review (holistic implementation review)...")
+    polisher_result = run_polisher(plan_file)
+
+    if not polisher_result.success:
+        # Polisher failed - escalate
+        should_continue, exit_code = evaluate_trigger(
+            state,
+            Task(id="polisher", title="Polish review", description="", status=TaskStatus.IN_PROGRESS),
+            "polisher",
+            f"Polisher failed: {polisher_result.block_reason or 'unknown error'}",
+            build_trigger_context(polisher_result),
+            session_id=polisher_result.session_id,
+        )
+        if not should_continue:
+            return exit_code
+        # Escalater decided to proceed - skip to finalizer
+
+    else:
+        polish_result = parse_polisher_result(polisher_result.output)
+
+        if polish_result["has_suggestions"]:
+            print("  Polisher has suggestions - implementing improvements...")
+            logger.info("Polisher found suggestions to address")
+
+            fix_result = run_polish_fix(polish_result["suggestions"], plan_file)
+
+            if not fix_result.success or fix_result.blocked:
+                reason = fix_result.block_reason or "Polish fix implementation failed"
+                should_continue, exit_code = evaluate_trigger(
+                    state,
+                    Task(id="polisher-fix", title="Address polish suggestions", description="", status=TaskStatus.IN_PROGRESS),
+                    "implementer",
+                    reason,
+                    build_trigger_context(fix_result),
+                    session_id=fix_result.session_id,
+                )
+                if not should_continue:
+                    return exit_code
+                # Escalater decided to proceed - continue to finalizer
+
+            # Log any decisions made during fix
+            log_decisions_from_output(fix_result.output, plan_file)
+
+            # Commit the polish improvements
+            print("  Committing polish improvements...")
+            commit_result = run_polish_commit()
+
+            if not commit_result.success or commit_result.blocked:
+                reason = commit_result.block_reason or "Polish commit failed"
+                should_continue, exit_code = evaluate_trigger(
+                    state,
+                    Task(id="polisher-commit", title="Commit polish improvements", description="", status=TaskStatus.IN_PROGRESS),
+                    "implementer",
+                    reason,
+                    build_trigger_context(commit_result),
+                    session_id=commit_result.session_id,
+                )
+                if not should_continue:
+                    return exit_code
+                # Escalater decided to proceed - continue to finalizer
+
+            print("  Polish improvements committed!")
+        else:
+            print("  Implementation already polished!")
+
+    print()
+
+    # === FINALIZER PHASE: Approve for merge ===
+    print("Running final review...")
 
     max_finalizer_iterations = 5
     iteration = 0
