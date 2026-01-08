@@ -242,6 +242,94 @@ def get_git_diff(max_size: int = 15000) -> str:
         return f"Error getting git diff: {e}"
 
 
+def run_task_splitter(task: Task, plan_file: str) -> SessionResult:
+    """
+    Analyze a task to determine if it should be split into subtasks.
+
+    Uses Claude to evaluate task complexity and propose subtasks if needed.
+    """
+    logger.info(f"Analyzing task {task.id} for potential splitting")
+
+    prompt_template = load_prompt("task-splitter")
+    plan_content = Path(plan_file).read_text()
+
+    prompt = prompt_template.format(
+        task_id=task.id,
+        task_title=task.title,
+        task_description=task.description,
+        plan_content=plan_content,
+    )
+
+    return run_claude(prompt)
+
+
+def parse_split_result(output: str) -> dict:
+    """
+    Parse the task splitter's output.
+
+    Returns dict with:
+        - should_split: bool
+        - subtasks: str - the subtasks section if splitting
+        - output: str - full output
+    """
+    output_lower = output.lower()
+
+    should_split = "[split]" in output_lower
+    no_split = "[no_split]" in output_lower
+
+    # Extract subtasks section if present
+    subtasks = ""
+    if should_split and "## subtasks" in output_lower:
+        # Find the subtasks section
+        import re
+        match = re.search(r'## Subtasks\s*\n(.*)', output, re.DOTALL | re.IGNORECASE)
+        if match:
+            subtasks = match.group(1).strip()
+
+    return {
+        "should_split": should_split and not no_split,
+        "subtasks": subtasks,
+        "output": output,
+    }
+
+
+def apply_task_split(plan_file: str, task: Task, subtasks: str) -> SessionResult:
+    """
+    Update the PLAN file to replace a task with its subtasks.
+
+    Has Claude do the actual file editing to handle various plan formats.
+    """
+    logger.info(f"Applying task split for {task.id}")
+
+    prompt = f"""Update the plan file to split task {task.id} into subtasks.
+
+## Plan File
+{plan_file}
+
+## Original Task
+Task {task.id}: {task.title}
+
+## New Subtasks to Replace It
+{subtasks}
+
+## Instructions
+
+1. Read the plan file
+2. Find task {task.id} ("{task.title}")
+3. Replace it with the subtasks above
+4. Keep the same format/style as the rest of the plan
+5. Mark the original task {task.id} as replaced (you can add a note or just remove it)
+6. The subtasks should be {task.id}.1, {task.id}.2, etc.
+
+Important:
+- Preserve the plan file's existing format
+- Each subtask needs [ ] checkbox if that's the plan's style
+- Include the full description for each subtask
+"""
+
+    return run_claude(prompt)
+
+
 def run_implementer(task: Task, plan_file: str, feedback: Optional[str] = None) -> SessionResult:
     """
     Run a fresh implementer session for a task.
@@ -1229,13 +1317,46 @@ def _run_orchestrator_inner(plan_file: str, step_mode: bool = False) -> int:
                 logger.warning("No pending tasks but plan not complete - check for blocked tasks")
                 return 1
 
-        # Set current task
-        set_current_task(task.id, task.title, plan_file)
-        update_task_status(plan_file, task.id, TaskStatus.IN_PROGRESS)
-
+        # === TASK SPLITTING CHECK ===
+        # Analyze if this task is too complex and should be split
         print()
         print(f"Task {task.id}: {task.title}")
         print("-" * 60)
+        print("  Analyzing task complexity...")
+
+        split_result = run_task_splitter(task, plan_file)
+
+        if split_result.success:
+            split_analysis = parse_split_result(split_result.output)
+
+            if split_analysis["should_split"] and split_analysis["subtasks"]:
+                print(f"  Task {task.id} is too complex - splitting into subtasks...")
+                logger.info(f"Splitting task {task.id} into subtasks")
+
+                # Apply the split to the plan file
+                apply_result = apply_task_split(plan_file, task, split_analysis["subtasks"])
+
+                if apply_result.success:
+                    print("  Plan updated with subtasks. Restarting with first subtask...")
+
+                    # Clear the cache so we re-parse the plan
+                    from plan_parser import clear_cache
+                    clear_cache()
+
+                    # Continue to pick up the first subtask
+                    continue
+                else:
+                    logger.warning(f"Failed to apply task split: {apply_result.block_reason}")
+                    print("  Failed to update plan - proceeding with original task")
+            else:
+                print("  Task is appropriately scoped")
+        else:
+            logger.warning(f"Task splitter failed: {split_result.block_reason}")
+            print("  Skipping complexity analysis - proceeding with task")
+
+        # Set current task
+        set_current_task(task.id, task.title, plan_file)
+        update_task_status(plan_file, task.id, TaskStatus.IN_PROGRESS)
 
         # === IMPLEMENTATION PHASE ===
         update_phase(Phase.IMPLEMENTING, plan_file)
