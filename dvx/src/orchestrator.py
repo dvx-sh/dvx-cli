@@ -1383,6 +1383,9 @@ def _run_orchestrator_inner(plan_file: str, step_mode: bool = False) -> int:
                 if apply_result.success:
                     print("  Plan updated with subtasks. Restarting with first subtask...")
 
+                    # Mark the parent task as done (it's been replaced by subtasks)
+                    update_task_status(plan_file, task.id, TaskStatus.DONE)
+
                     # Clear the cache so we re-parse the plan
                     from plan_parser import clear_cache
                     clear_cache()
