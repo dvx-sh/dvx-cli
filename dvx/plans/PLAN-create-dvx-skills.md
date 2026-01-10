@@ -1,6 +1,6 @@
 # PLAN: Create DVX Skills for Claude Code (Phase 1 - Core)
 
-**Status**: Design Review
+**Status**: Complete
 **Prepared**: 2025-01-10
 **Repo**: dvx-cli
 
@@ -100,7 +100,7 @@ This:
 
 ## Implementation Plan
 
-### [ ] Task 1: Create Skills Directory
+### [x] Task 1: Create Skills Directory
 
 Set up the skills directory structure.
 
@@ -108,7 +108,7 @@ Set up the skills directory structure.
 - `src/skills/` directory
 - `src/skills/_template.md` showing the format
 
-### [ ] Task 2: Port Orchestration Skills
+### [x] Task 2: Port Orchestration Skills
 
 Convert all 7 prompt files to skill format.
 
@@ -126,7 +126,7 @@ Convert all 7 prompt files to skill format.
 - `src/skills/polish.md`
 - `src/skills/finalize.md`
 
-### [ ] Task 3: Create Help and Status Skills
+### [x] Task 3: Create Help and Status Skills
 
 Basic interactive skills for humans.
 
@@ -134,7 +134,7 @@ Basic interactive skills for humans.
 - `src/skills/help.md` - Lists all /dvx:* skills
 - `src/skills/status.md` - Shows .dvx/ state
 
-### [ ] Task 4: Add run_skill() to Orchestrator
+### [x] Task 4: Add run_skill() to Orchestrator
 
 New function to invoke skills instead of loading prompts.
 
@@ -145,7 +145,7 @@ New function to invoke skills instead of loading prompts.
 - Update all other `run_*()` functions
 - Remove `load_prompt()` function
 
-### [ ] Task 5: Add Skill Installation
+### [x] Task 5: Add Skill Installation
 
 Install skills when dvx is installed.
 
@@ -155,14 +155,14 @@ Install skills when dvx is installed.
 - `src/cli.py` - Add `ensure_skills_installed()` function
 - `pyproject.toml` - Include skills in package data
 
-### [ ] Task 6: Remove Prompt Files
+### [x] Task 6: Remove Prompt Files
 
 Clean up old architecture.
 
 **Delete:**
 - `prompts/` directory and all files
 
-### [ ] Task 7: Update README
+### [x] Task 7: Update README
 
 Document the new skill-based architecture.
 

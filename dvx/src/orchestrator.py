@@ -35,8 +35,8 @@ from state import (
 
 logger = logging.getLogger(__name__)
 
-# Path to prompts directory
-PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
+# Path to skills directory
+SKILLS_DIR = Path(__file__).parent / "skills"
 
 
 def parse_decisions(output: str) -> list[dict]:
@@ -83,12 +83,61 @@ def log_decisions_from_output(output: str, plan_file: str) -> None:
         logger.info(f"Logged decision: {d['topic']}")
 
 
-def load_prompt(name: str) -> str:
-    """Load a prompt template from the prompts directory."""
-    prompt_file = PROMPTS_DIR / f"{name}.md"
-    if not prompt_file.exists():
-        raise FileNotFoundError(f"Prompt template not found: {prompt_file}")
-    return prompt_file.read_text()
+def load_skill(name: str) -> str:
+    """
+    Load a skill file and return its content (without YAML frontmatter).
+
+    Skills are markdown files with YAML frontmatter that can be used both:
+    - As Claude Code commands (/dvx:skill_name)
+    - As prompt templates loaded by the orchestrator
+    """
+    skill_file = SKILLS_DIR / f"{name}.md"
+    if not skill_file.exists():
+        raise FileNotFoundError(f"Skill not found: {skill_file}")
+
+    content = skill_file.read_text()
+
+    # Strip YAML frontmatter (everything between first --- and second ---)
+    if content.startswith("---"):
+        parts = content.split("---", 2)
+        if len(parts) >= 3:
+            content = parts[2].strip()
+
+    return content
+
+
+def run_skill(
+    skill_name: str,
+    args: dict[str, str],
+    model: Optional[str] = None,
+    session_id: Optional[str] = None,
+    append_system_prompt: Optional[str] = None,
+) -> SessionResult:
+    """
+    Load a skill file, substitute arguments, and run it.
+
+    Args:
+        skill_name: Name of the skill (e.g., "implement", "review")
+        args: Dictionary of argument name -> value
+        model: Optional model override
+        session_id: Optional session ID for continuity
+        append_system_prompt: Optional additional system prompt
+
+    Returns:
+        SessionResult from the Claude session
+    """
+    content = load_skill(skill_name)
+
+    # Replace $ARGUMENTS.name with actual values
+    for name, value in args.items():
+        content = content.replace(f"$ARGUMENTS.{name}", str(value))
+
+    return run_claude(
+        content,
+        model=model,
+        session_id=session_id,
+        append_system_prompt=append_system_prompt,
+    )
 
 
 def get_change_stats() -> dict:
@@ -281,17 +330,15 @@ def run_task_splitter(task: Task, plan_file: str) -> SessionResult:
     """
     logger.info(f"Analyzing task {task.id} for potential splitting")
 
-    prompt_template = load_prompt("task-splitter")
     plan_content = Path(plan_file).read_text()
 
-    prompt = prompt_template.format(
-        task_id=task.id,
-        task_title=task.title,
-        task_description=task.description,
-        plan_content=plan_content,
-    )
-
-    return run_claude(prompt)
+    return run_skill("split-task", {
+        "task_id": task.id,
+        "task_title": task.title,
+        "task_description": task.description,
+        "plan_file": plan_file,
+        "plan_content": plan_content,
+    })
 
 
 def parse_split_result(output: str) -> dict:
@@ -372,20 +419,15 @@ def run_implementer(task: Task, plan_file: str, feedback: Optional[str] = None) 
     """
     logger.info(f"Running implementer for task {task.id}: {task.title}")
 
-    prompt_template = load_prompt("implementer")
-    if feedback:
-        prompt_template = load_prompt("implementer-fix")
+    skill_name = "implement-fix" if feedback else "implement"
 
-    # Build the prompt
-    prompt = prompt_template.format(
-        task_id=task.id,
-        task_title=task.title,
-        task_description=task.description,
-        plan_file=plan_file,
-        feedback=feedback or "",
-    )
-
-    return run_claude(prompt)
+    return run_skill(skill_name, {
+        "task_id": task.id,
+        "task_title": task.title,
+        "task_description": task.description,
+        "plan_file": plan_file,
+        "feedback": feedback or "",
+    })
 
 
 def run_reviewer(plan_file: str, task: Task, overseer_session_id: Optional[str] = None) -> tuple[SessionResult, Optional[str]]:
@@ -396,17 +438,14 @@ def run_reviewer(plan_file: str, task: Task, overseer_session_id: Optional[str] 
     """
     logger.info("Running reviewer...")
 
-    prompt_template = load_prompt("reviewer")
     git_diff = get_git_diff()
 
-    prompt = prompt_template.format(
-        task_id=task.id,
-        task_title=task.title,
-        plan_file=plan_file,
-        git_diff=git_diff,
-    )
-
-    result = run_claude(prompt, session_id=overseer_session_id)
+    result = run_skill("review", {
+        "task_id": task.id,
+        "task_title": task.title,
+        "plan_file": plan_file,
+        "git_diff": git_diff,
+    }, session_id=overseer_session_id)
 
     return result, result.session_id
 
@@ -503,19 +542,16 @@ def run_escalater(
     """
     logger.info(f"Running escalater for trigger from {trigger_source}: {trigger_reason}")
 
-    prompt_template = load_prompt("escalater")
-
-    prompt = prompt_template.format(
-        task_id=task.id,
-        task_title=task.title,
-        trigger_source=trigger_source,
-        trigger_reason=trigger_reason,
-        context=context,
-    )
-
     # Use Opus with extended thinking for thorough analysis
-    return run_claude(
-        prompt,
+    return run_skill(
+        "escalate",
+        {
+            "task_id": task.id,
+            "task_title": task.title,
+            "trigger_source": trigger_source,
+            "trigger_reason": trigger_reason,
+            "context": context,
+        },
         model="opus",
         append_system_prompt="Use extended thinking to thoroughly analyze this situation before making a decision.",
     )
@@ -628,23 +664,20 @@ def run_polisher(plan_file: str) -> SessionResult:
     """
     logger.info(f"Running polisher for {plan_file}")
 
-    prompt_template = load_prompt("polisher")
-
     # Get the full diff of all changes
     git_diff = get_git_diff()
 
     # Read plan content
     plan_content = Path(plan_file).read_text()
 
-    prompt = prompt_template.format(
-        plan_file=plan_file,
-        git_diff=git_diff,
-        plan_content=plan_content,
-    )
-
     # Use Opus with extended thinking for thorough review
-    return run_claude(
-        prompt,
+    return run_skill(
+        "polish",
+        {
+            "plan_file": plan_file,
+            "git_diff": git_diff,
+            "plan_content": plan_content,
+        },
         model="opus",
         append_system_prompt="Use extended thinking to review the entire implementation holistically and identify meaningful improvements.",
     )
@@ -776,24 +809,21 @@ def run_finalizer(plan_file: str) -> SessionResult:
     """
     logger.info(f"Running finalizer for {plan_file}")
 
-    prompt_template = load_prompt("finalizer")
-
     # Get branch info
     current_branch, base_branch = get_branch_info()
 
     # Read plan content
     plan_content = Path(plan_file).read_text()
 
-    prompt = prompt_template.format(
-        plan_file=plan_file,
-        current_branch=current_branch,
-        base_branch=base_branch,
-        plan_content=plan_content,
-    )
-
     # Use Opus with extended thinking for thorough review
-    return run_claude(
-        prompt,
+    return run_skill(
+        "finalize",
+        {
+            "plan_file": plan_file,
+            "current_branch": current_branch,
+            "base_branch": base_branch,
+            "plan_content": plan_content,
+        },
         model="opus",
         append_system_prompt="Use extended thinking to thoroughly review all changes before approving.",
     )

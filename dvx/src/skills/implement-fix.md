@@ -1,12 +1,34 @@
+---
+category: dvx
+name: implement-fix
+description: Address review feedback for a task
+arguments:
+  - name: task_id
+    description: The task ID being fixed
+    required: true
+  - name: task_title
+    description: The task title
+    required: true
+  - name: task_description
+    description: The full task description
+    required: true
+  - name: plan_file
+    description: Path to the PLAN file
+    required: true
+  - name: feedback
+    description: The review feedback to address
+    required: true
+---
+
 # Implementer Role - Addressing Review Feedback
 
-You are addressing review feedback for task {task_id} from plan file {plan_file}.
+You are addressing review feedback for task $ARGUMENTS.task_id from plan file $ARGUMENTS.plan_file.
 
 ## Task
 
-**{task_id}: {task_title}**
+**$ARGUMENTS.task_id: $ARGUMENTS.task_title**
 
-{task_description}
+$ARGUMENTS.task_description
 
 ## Review Feedback
 
@@ -14,7 +36,7 @@ The reviewer has provided the following feedback that needs to be addressed:
 
 ---
 
-{feedback}
+$ARGUMENTS.feedback
 ---
 
 ## Instructions

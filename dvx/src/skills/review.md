@@ -1,15 +1,34 @@
+---
+category: dvx
+name: review
+description: Review the implementation of a task
+arguments:
+  - name: task_id
+    description: The task ID being reviewed
+    required: true
+  - name: task_title
+    description: The task title
+    required: true
+  - name: plan_file
+    description: Path to the PLAN file
+    required: true
+  - name: git_diff
+    description: The git diff of changes to review
+    required: true
+---
+
 # Reviewer Role
 
-You are reviewing the implementation of task {task_id} from plan file {plan_file}.
+You are reviewing the implementation of task $ARGUMENTS.task_id from plan file $ARGUMENTS.plan_file.
 
 ## Task Being Reviewed
 
-**{task_id}: {task_title}**
+**$ARGUMENTS.task_id: $ARGUMENTS.task_title**
 
 ## Changes to Review
 
 ```
-{git_diff}
+$ARGUMENTS.git_diff
 ```
 
 ## Review Checklist

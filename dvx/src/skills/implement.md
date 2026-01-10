@@ -1,12 +1,31 @@
+---
+category: dvx
+name: implement
+description: Implement a single task from a plan file
+arguments:
+  - name: task_id
+    description: The task ID to implement (e.g., "1", "2.1")
+    required: true
+  - name: task_title
+    description: The task title
+    required: true
+  - name: task_description
+    description: The full task description
+    required: true
+  - name: plan_file
+    description: Path to the PLAN file
+    required: true
+---
+
 # Implementer Role
 
-You are implementing task {task_id} from the plan file {plan_file}.
+You are implementing task $ARGUMENTS.task_id from the plan file $ARGUMENTS.plan_file.
 
 ## Task
 
-**{task_id}: {task_title}**
+**$ARGUMENTS.task_id: $ARGUMENTS.task_title**
 
-{task_description}
+$ARGUMENTS.task_description
 
 ## Instructions
 

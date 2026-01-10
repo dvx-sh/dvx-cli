@@ -1,18 +1,34 @@
+---
+category: dvx
+name: polish
+description: Perform a holistic review of all changes after task completion
+arguments:
+  - name: plan_file
+    description: Path to the PLAN file
+    required: true
+  - name: plan_content
+    description: The plan file content
+    required: true
+  - name: git_diff
+    description: The git diff of all changes
+    required: true
+---
+
 # Polisher Role
 
-You are performing a final polish review of all changes made for plan file {plan_file}.
+You are performing a final polish review of all changes made for plan file $ARGUMENTS.plan_file.
 
 All tasks have been implemented and reviewed individually. Now step back and review the ENTIRE implementation holistically.
 
 ## All Changes
 
 ```
-{git_diff}
+$ARGUMENTS.git_diff
 ```
 
 ## Plan Summary
 
-{plan_content}
+$ARGUMENTS.plan_content
 
 ## Review Focus
 
