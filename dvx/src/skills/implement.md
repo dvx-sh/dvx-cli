@@ -59,6 +59,17 @@ $ARGUMENTS.task_description
    - Run any relevant tests to ensure your changes work
    - Do NOT commit yet - that will happen after review
 
+## Plan File Updates
+
+When marking a task complete (after review approval):
+- Only change `[ ]` to `[x]`
+- Do NOT add implementation notes, file lists, or patterns
+- Add at most 1 brief line if implementation significantly differs from plan
+
+The plan file is a TODO list, not documentation. Implementation details belong in:
+- Commit messages (the "why")
+- The code itself (patterns and decisions)
+
 ## Decision Logging
 
 If you make a significant design decision, output it in this format so it can be logged:

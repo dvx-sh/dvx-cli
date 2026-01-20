@@ -1057,30 +1057,27 @@ def run_implementer_commit(task: Task, plan_file: str) -> SessionResult:
     prompt = f"""The implementation for task {task.id} ({task.title}) has been reviewed and approved.
 
 Please:
-1. Review the codebase changes you made for this task
-2. Update the plan file ({plan_file}):
-   - Mark task {task.id} as complete (change [ ] to [x])
-   - Add any notes or context that would help a NEW session understand what was done
-   - If implementation details differ from the original plan, update the task description
-   - Ensure future tasks have enough context to continue without your session history
-3. Stage ONLY files you modified for this task
-4. Create a commit with a meaningful message explaining why these changes were made
+1. Mark task {task.id} as complete in the plan file ({plan_file}):
+   - Change [ ] to [x]
+   - DO NOT add implementation notes, file lists, or patterns
+   - Add at most 1 brief line ONLY if implementation significantly differs from plan
 
-IMPORTANT - Session continuity:
-- A completely new Claude session will pick up the next task
-- That session will ONLY have the plan file for context - not your conversation history
-- Make sure the plan file captures any decisions, patterns, or context needed to continue
+2. Stage ONLY files you modified for this task
+3. Create a commit with a meaningful message explaining WHY
 
-IMPORTANT - Multiple sessions may be running in this project:
-- Other dvx sessions may be working on different plans concurrently
+IMPORTANT - Keep the plan file LEAN:
+- The plan is a TODO list, not documentation
+- Implementation details belong in commit messages and code
+- New sessions can read the codebase to understand patterns
+
+IMPORTANT - Multiple sessions may be running:
 - Only commit files that YOU modified for THIS task
-- Do NOT stage or commit files from other sessions' work
 - Use `git status` to verify you're only committing your changes
 - If you see changes you didn't make, leave them unstaged
 
 Commit guidelines:
-- The plan file ({plan_file}) should be included in the commit
-- Use a descriptive commit message focused on the "why" not the "what"
+- Include the plan file ({plan_file}) in the commit
+- Focus the message on WHY not WHAT
 """
 
     return run_claude(prompt)
