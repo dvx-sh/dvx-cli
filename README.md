@@ -50,6 +50,17 @@ The `run` command handles everything automatically:
 - **Paused** (step mode): Continues to next task
 - **Complete**: Shows completion message
 
+## Claude Code Skills
+
+Installing dvx also installs `/dvx:*` skills for Claude Code. Use them directly in Claude Code:
+
+```
+/dvx:help      # Show all available dvx skills
+/dvx:status    # Show current orchestration state
+```
+
+The orchestration skills (implement, review, polish, finalize, etc.) are used internally by `dvx run`.
+
 ## How It Works
 
 1. Write a plan file (any markdown format - dvx uses Claude to parse it)

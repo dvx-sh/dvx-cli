@@ -1,16 +1,38 @@
+---
+category: dvx
+name: split-task
+description: Analyze a task to determine if it should be split into subtasks
+arguments:
+  - name: task_id
+    description: The task ID to analyze
+    required: true
+  - name: task_title
+    description: The task title
+    required: true
+  - name: task_description
+    description: The full task description
+    required: true
+  - name: plan_file
+    description: Path to the PLAN file
+    required: true
+  - name: plan_content
+    description: The full plan file content for context
+    required: true
+---
+
 # Task Splitter Role
 
 You are analyzing a task to determine if it should be split into smaller subtasks.
 
 ## Task to Analyze
 
-**Task {task_id}: {task_title}**
+**Task $ARGUMENTS.task_id: $ARGUMENTS.task_title**
 
-{task_description}
+$ARGUMENTS.task_description
 
 ## Plan Context
 
-{plan_content}
+$ARGUMENTS.plan_content
 
 ## Analysis Criteria
 
@@ -43,13 +65,13 @@ If the task should be split:
 
 ## Subtasks
 
-{task_id}.1 [Subtask title]
+$ARGUMENTS.task_id.1 [Subtask title]
 [Description with enough context for a new session to implement without prior knowledge]
 
-{task_id}.2 [Subtask title]
+$ARGUMENTS.task_id.2 [Subtask title]
 [Description with enough context for a new session to implement without prior knowledge]
 
-{task_id}.3 [Subtask title]
+$ARGUMENTS.task_id.3 [Subtask title]
 [Description with enough context for a new session to implement without prior knowledge]
 ```
 
@@ -59,7 +81,7 @@ If the task should be split:
 - A new Claude session will implement each subtask with ONLY the plan file for context
 - Include specific file paths, function names, and implementation details
 - Subtasks should be in dependency order (earlier ones first)
-- Use {task_id}.1, {task_id}.2, etc. for subtask IDs
+- Use $ARGUMENTS.task_id.1, $ARGUMENTS.task_id.2, etc. for subtask IDs
 - 2-5 subtasks is typical; more suggests the original task was too ambitious
 
 ## CRITICAL: Forbidden Operations

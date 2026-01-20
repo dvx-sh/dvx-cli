@@ -31,6 +31,9 @@ build-backend = "setuptools.build_meta"
 py-modules = ["cli", "orchestrator", "claude_session", "plan_parser", "state"]
 package-dir = {"" = "src"}
 
+[tool.setuptools.package-data]
+"*" = ["skills/*.md"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py310"
