@@ -203,6 +203,11 @@ Example of pending task (keep full details):
    Full description of what needs to be done...
 
 IMPORTANT: Preserve task IDs exactly as they appear (1, 2, 3.1, 3.2.1, etc.)
+
+After writing the compressed file, commit it with a message like:
+  plan: compress {filepath.name} to remove completed task notes
+
+This commit prevents the next task from seeing a large deletion diff and blocking.
 """
 
     result = run_claude(prompt, timeout=180)
