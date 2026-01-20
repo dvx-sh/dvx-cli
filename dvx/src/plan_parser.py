@@ -23,6 +23,13 @@ CACHE_DIR = Path(__file__).parent.parent / ".cache"
 # Status tracking file (in .dvx directory of the project)
 STATUS_FILE = ".dvx/task-status.json"
 
+# Token limit for plan files (Claude's context window consideration)
+# Plan files exceeding this will be compressed automatically
+MAX_PLAN_TOKENS = 20000  # Conservative limit to leave room for prompts
+
+# Rough token estimation: ~4 chars per token for English text
+CHARS_PER_TOKEN = 4
+
 
 class TaskStatus(Enum):
     PENDING = "pending"
@@ -137,9 +144,114 @@ def _save_to_cache(filepath: Path, tasks: list[Task]) -> None:
     logger.debug(f"Saved {len(tasks)} tasks to cache")
 
 
+def _estimate_tokens(text: str) -> int:
+    """Rough token estimate for text."""
+    return len(text) // CHARS_PER_TOKEN
+
+
+def _compress_plan_file(filepath: Path) -> Path:
+    """
+    Compress an oversized plan file by extracting only incomplete work.
+
+    When a plan file grows too large (from verbose implementation notes on
+    completed tasks), this function:
+    1. Reads the status tracking file to know which tasks are done
+    2. Backs up the original first
+    3. Uses Claude to create a lean version with only pending tasks
+    4. Validates the result
+
+    Returns the path to the compressed file (same as input filepath).
+    """
+    original_content = filepath.read_text()
+    tokens = _estimate_tokens(original_content)
+
+    logger.warning(f"Plan file too large: {filepath.name} (~{tokens} tokens, limit {MAX_PLAN_TOKENS})")
+    logger.info("Compressing plan file to keep only incomplete work...")
+
+    # Back up original FIRST (before Claude might modify it)
+    backup_path = filepath.with_suffix('.md.backup')
+    backup_path.write_text(original_content)
+    logger.info(f"Backed up original to: {backup_path}")
+
+    # Load status overrides to know which tasks are done
+    overrides = _load_status_overrides(filepath)
+    done_tasks = [tid for tid, status in overrides.items() if status == "done"]
+
+    prompt = f"""This plan file has grown too large and needs to be compressed.
+
+TASK STATUS (from tracking file):
+Done tasks: {', '.join(done_tasks) if done_tasks else 'none'}
+
+CURRENT PLAN FILE:
+---
+{original_content}
+---
+
+Create a COMPRESSED version that:
+1. Keeps the title and essential context (first ~50 lines or less)
+2. For DONE tasks: Keep ONLY the task ID and title with [x] marker, remove all implementation notes
+3. For PENDING/IN-PROGRESS tasks: Keep full description needed for implementation
+4. Remove verbose implementation notes, file lists, and patterns from completed work
+
+Write the compressed content directly to the plan file: {filepath}
+
+Example of compressed done task:
+### 3.2.1 [x] Convert get_ontology tool to error results
+
+Example of pending task (keep full details):
+### 4. [ ] Document the error handling pattern
+   Full description of what needs to be done...
+
+IMPORTANT: Preserve task IDs exactly as they appear (1, 2, 3.1, 3.2.1, etc.)
+"""
+
+    result = run_claude(prompt, timeout=180)
+
+    if not result.success:
+        # Restore backup on failure
+        filepath.write_text(original_content)
+        logger.error(f"Failed to compress plan: {result.block_reason}")
+        raise RuntimeError(f"Plan compression failed: {result.block_reason}")
+
+    # Re-read file to see what Claude wrote (it may have used Write tool)
+    compressed = filepath.read_text()
+
+    # Validate we got something reasonable
+    if len(compressed) < 100:
+        # Restore backup
+        filepath.write_text(original_content)
+        raise RuntimeError("Compressed plan is too small - something went wrong")
+
+    # Check it's actually smaller
+    if len(compressed) >= len(original_content):
+        logger.warning("Compressed plan is not smaller than original - keeping as-is")
+        filepath.write_text(original_content)
+        return filepath
+
+    new_tokens = _estimate_tokens(compressed)
+    if new_tokens > MAX_PLAN_TOKENS:
+        logger.warning(f"Compressed plan still large (~{new_tokens} tokens), but proceeding")
+
+    reduction = (1 - len(compressed) / len(original_content)) * 100
+    logger.info(f"Compressed plan: {len(original_content)} -> {len(compressed)} chars ({reduction:.0f}% reduction)")
+
+    # Clear cache since content changed
+    cache_path = _get_cache_path(filepath)
+    if cache_path.exists():
+        cache_path.unlink()
+
+    return filepath
+
+
 def _parse_with_claude(filepath: Path) -> list[Task]:
     """Use Claude to parse the plan file."""
     content = filepath.read_text()
+
+    # Check if plan file is too large and needs compression
+    tokens = _estimate_tokens(content)
+    if tokens > MAX_PLAN_TOKENS:
+        _compress_plan_file(filepath)
+        content = filepath.read_text()  # Re-read compressed content
 
     prompt = f"""Analyze this plan file and extract all tasks/phases/steps that need to be implemented.
 
