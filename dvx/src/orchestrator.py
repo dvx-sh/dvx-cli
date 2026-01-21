@@ -1054,33 +1054,11 @@ def run_implementer_commit(task: Task, plan_file: str) -> SessionResult:
     """Tell the implementer to update the plan and commit."""
     logger.info("Running implementer commit...")
 
-    prompt = f"""The implementation for task {task.id} ({task.title}) has been reviewed and approved.
-
-Please:
-1. Mark task {task.id} as complete in the plan file ({plan_file}):
-   - Change [ ] to [x]
-   - DO NOT add implementation notes, file lists, or patterns
-   - Add at most 1 brief line ONLY if implementation significantly differs from plan
-
-2. Stage ONLY files you modified for this task
-3. Create a commit with a meaningful message explaining WHY
-
-IMPORTANT - Keep the plan file LEAN:
-- The plan is a TODO list, not documentation
-- Implementation details belong in commit messages and code
-- New sessions can read the codebase to understand patterns
-
-IMPORTANT - Multiple sessions may be running:
-- Only commit files that YOU modified for THIS task
-- Use `git status` to verify you're only committing your changes
-- If you see changes you didn't make, leave them unstaged
-
-Commit guidelines:
-- Include the plan file ({plan_file}) in the commit
-- Focus the message on WHY not WHAT
-"""
-
-    return run_claude(prompt)
+    return run_skill("commit-task", {
+        "task_id": task.id,
+        "task_title": task.title,
+        "plan_file": plan_file,
+    })
 
 
 def handle_blocked(state: State, reason: str, context: str, session_id: Optional[str] = None) -> int:
@@ -1671,16 +1649,11 @@ Then type `/exit` to continue orchestration.
             print("  Adding missing tests...")
             update_phase(Phase.TESTING, plan_file)
 
-            test_prompt = f"""The reviewer noted that tests are missing for task {task.id} ({task.title}).
-
-Please add appropriate tests for the changes made. Consider:
-- Unit tests for new functions/methods
-- Integration tests if appropriate
-- Edge cases and error handling
-
-Run the tests after writing them to ensure they pass.
-"""
-            test_result = run_claude(test_prompt)
+            test_result = run_skill("add-tests", {
+                "task_id": task.id,
+                "task_title": task.title,
+                "reviewer_notes": review['suggestions'],
+            })
 
             if not test_result.success or test_result.blocked:
                 reason = test_result.block_reason or "Test writing failed"

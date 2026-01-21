@@ -21,6 +21,15 @@ DVX is a development orchestration system that automates implement â†’ review â†
 | `/dvx:split-task` | Analyze a task to determine if it should be split into subtasks |
 | `/dvx:polish` | Perform a holistic review of all changes after task completion |
 | `/dvx:finalize` | Final quality gate before merge |
+| `/dvx:commit-task` | Mark a task complete and commit changes |
+| `/dvx:add-tests` | Add missing tests for a task implementation |
+
+### Planning Skills (Used by `dvx plan`)
+
+| Skill | Description |
+|-------|-------------|
+| `/dvx:create-plan` | Create a new implementation plan from requirements |
+| `/dvx:update-plan` | Update an existing plan file with changes |
 
 ### Interactive Skills (For Humans)
 
@@ -28,6 +37,7 @@ DVX is a development orchestration system that automates implement â†’ review â†
 |-------|-------------|
 | `/dvx:help` | Show this help message |
 | `/dvx:status` | Show current orchestration state |
+| `/dvx:resolve-blocked` | Help resolve a blocked dvx orchestration |
 
 ## CLI Commands
 
