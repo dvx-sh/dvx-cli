@@ -13,8 +13,8 @@ from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from claude_session import launch_interactive, run_claude
-from orchestrator import run_orchestrator
+from claude_session import launch_interactive
+from orchestrator import load_skill, run_orchestrator, run_skill
 from plan_parser import (
     clear_status_for_plan,
     get_next_pending_task,
@@ -87,7 +87,7 @@ def get_user_input_from_editor() -> str:
 
 def cmd_plan(args) -> int:
     """
-    Generate or update a plan file using Claude Code ultrathink mode.
+    Generate or update a plan file using Claude Code.
 
     Input can be piped or entered via editor.
     If plan_file is provided, uses that name; otherwise Claude suggests one.
@@ -109,7 +109,7 @@ def cmd_plan(args) -> int:
         print("Error: No input provided.")
         return 1
 
-    print("Generating plan with Claude ultrathink...")
+    print("Generating plan with Claude...")
     print()
 
     # Check if updating existing file
@@ -120,51 +120,18 @@ def cmd_plan(args) -> int:
     else:
         action = "create"
 
-    # Build the prompt
+    # Use skills instead of inline prompts
     if action == "update":
-        prompt = f"""You are updating an existing plan file.
-
-EXISTING PLAN:
-{existing_content}
-
-USER'S REQUEST:
-{user_input}
-
-Update the plan file based on the user's request. Maintain the existing structure where appropriate.
-Output ONLY the complete updated plan file content, no explanations.
-"""
+        result = run_skill("update-plan", {
+            "plan_file": plan_file,
+            "changes": user_input,
+            "existing_content": existing_content,
+        }, model="opus")
     else:
-        if plan_file:
-            filename_instruction = f"The file will be named: {plan_file}"
-        else:
-            filename_instruction = """At the very end of your response, on a new line, output ONLY:
-FILENAME: PLAN-<descriptive-name>.md
-
-Choose a descriptive name based on the plan content."""
-
-        prompt = f"""Write a detailed implementation plan in markdown format.
-
-REQUEST: {user_input}
-
-REQUIREMENTS:
-- Start with "# Plan: <title>" header
-- Include "## Overview" section explaining the goal
-- Break into "## Phase N: Title" sections
-- Be EXTREMELY detailed in each phase:
-  - Include complete code examples with types and functions
-  - Show data structures with all fields
-  - Include SQL queries where relevant
-  - Specify file paths and directory structures
-  - Write algorithm implementations, not just descriptions
-- Each phase must be comprehensive enough to implement without clarification
-
-{filename_instruction}
-
-CRITICAL: Output ONLY the raw markdown plan. Start immediately with "# Plan:" - no preamble, no summary, no "I've created", no conversational text.
-"""
-
-    # Run Claude with Opus for deep thinking on plans
-    result = run_claude(prompt, timeout=300, model='opus')
+        result = run_skill("create-plan", {
+            "requirements": user_input,
+            "output_file": plan_file or "",
+        }, model="opus")
 
     if not result.success:
         print(f"Error: Claude failed - {result.block_reason or 'unknown error'}")
@@ -334,38 +301,14 @@ def cmd_run(args) -> int:
 
         # Start a FRESH session with just the blocked context (not the accumulated overseer session)
         # This avoids context bloat from previous tasks
-        initial_prompt = f"""You are helping resolve a blocked dvx orchestration.
+        # Load the resolve-blocked skill and substitute arguments
+        skill_content = load_skill("resolve-blocked")
+        initial_prompt = skill_content.replace("$ARGUMENTS.plan_file", state.plan_file)
+        initial_prompt = initial_prompt.replace("$ARGUMENTS.task_id", state.current_task_id or "")
+        initial_prompt = initial_prompt.replace("$ARGUMENTS.task_title", state.current_task_title or "")
+        initial_prompt = initial_prompt.replace("$ARGUMENTS.blocked_reason", "See context below")
+        initial_prompt = initial_prompt.replace("$ARGUMENTS.context", blocked_context)
 
-## Current Task
-
-**Task {state.current_task_id}**: {state.current_task_title}
-
-## Plan File
-
-{state.plan_file}
-
-## Issue
-
-{blocked_context}
-
-## Instructions
-
-When explaining the blocking reason:
-1. Summarize WHY this was blocked (1-2 sentences)
-2. List the specific issues that need to be addressed
-3. Ask if the user wants you to start fixing them
-
-After explaining, wait for user direction before taking action.
-
-## IMPORTANT: Before User Types /exit
-
-When the user indicates the task is complete (or before they type /exit):
-1. **Update the plan file**: Mark the task as complete with [x] or ✅
-2. **Commit changes**: Stage and commit all changes for this task
-3. Confirm to the user that the task is marked complete
-
-This ensures dvx knows to move to the next task instead of re-implementing this one.
-"""
         launch_interactive(initial_prompt=initial_prompt, plan_file=plan_file)
 
         print()
@@ -580,7 +523,7 @@ def main() -> int:
     clean_parser.set_defaults(func=cmd_clean)
 
     # plan
-    plan_parser = subparsers.add_parser("plan", help="Generate or update a plan file with Claude ultrathink")
+    plan_parser = subparsers.add_parser("plan", help="Generate or update a plan file with Claude")
     plan_parser.add_argument("plan_file", nargs="?", help="Path to PLAN-*.md file (optional)")
     plan_parser.set_defaults(func=cmd_plan)
 
