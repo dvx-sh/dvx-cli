@@ -87,7 +87,7 @@ def get_user_input_from_editor() -> str:
 
 def cmd_plan(args) -> int:
     """
-    Generate or update a plan file using Claude Code ultrathink mode.
+    Generate or update a plan file using Claude Code.
 
     Input can be piped or entered via editor.
     If plan_file is provided, uses that name; otherwise Claude suggests one.
@@ -109,7 +109,7 @@ def cmd_plan(args) -> int:
         print("Error: No input provided.")
         return 1
 
-    print("Generating plan with Claude ultrathink...")
+    print("Generating plan with Claude...")
     print()
 
     # Check if updating existing file
@@ -523,7 +523,7 @@ def main() -> int:
     clean_parser.set_defaults(func=cmd_clean)
 
     # plan
-    plan_parser = subparsers.add_parser("plan", help="Generate or update a plan file with Claude ultrathink")
+    plan_parser = subparsers.add_parser("plan", help="Generate or update a plan file with Claude")
     plan_parser.add_argument("plan_file", nargs="?", help="Path to PLAN-*.md file (optional)")
     plan_parser.set_defaults(func=cmd_plan)
 

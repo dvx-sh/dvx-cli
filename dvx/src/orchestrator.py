@@ -529,7 +529,7 @@ def run_escalater(
     """
     Run the escalater to evaluate a trigger and decide next steps.
 
-    Uses Opus with ultrathink for deep reasoning.
+    Uses Opus for deep reasoning.
 
     Args:
         task: The current task
@@ -653,7 +653,7 @@ def run_polisher(plan_file: str) -> SessionResult:
     """
     Run a holistic polish review of all changes.
 
-    Uses Opus with ultrathink to review the entire implementation
+    Uses Opus to review the entire implementation
     and suggest improvements before final approval.
 
     Args:
@@ -799,7 +799,7 @@ def run_finalizer(plan_file: str) -> SessionResult:
     """
     Run the finalizer to review all changes before merge.
 
-    Uses Opus with ultrathink for thorough final review.
+    Uses Opus for thorough final review.
 
     Args:
         plan_file: Path to the plan file
