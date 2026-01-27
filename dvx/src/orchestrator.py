@@ -1088,7 +1088,7 @@ def handle_blocked(state: State, reason: str, context: str, session_id: Optional
     print()
     print(f"Run `dvx run {state.plan_file}` and when resolved type `/exit` - dvx will continue.")
     print()
-
+    print(f"dvx is blocked on {state.plan_file}.")
     return 1  # Exit with error to signal blocked state
 
 
@@ -1315,6 +1315,7 @@ def _run_finalization(plan_file: str, state: State) -> int:
         print()
         print(f"To clean up after merge: dvx clean {plan_file}")
         print()
+        print(f"dvx successfully completed {plan_file}")
         return 0
     else:
         print("  Warning: Finalization encountered issues, but plan is complete.")
