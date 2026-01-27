@@ -38,6 +38,7 @@ DVX is a development orchestration system that automates implement â†’ review â†
 | `/dvx:help` | Show this help message |
 | `/dvx:status` | Show current orchestration state |
 | `/dvx:resolve-blocked` | Help resolve a blocked dvx orchestration |
+| `/dvx:create-list` | Create a YAML queue file for batch dvx runs |
 
 ## CLI Commands
 
@@ -47,6 +48,7 @@ The `dvx` CLI provides these commands:
 |---------|-------------|
 | `dvx plan <file>` | Create or update a PLAN file |
 | `dvx run <plan>` | Start or resume orchestration |
+| `dvx run <queue.yaml>` | Run multiple plans sequentially from a YAML queue |
 | `dvx status` | Show current status |
 | `dvx decisions` | Show decisions made during execution |
 | `dvx clean <plan>` | Clean up state for a plan |
@@ -69,6 +71,18 @@ The `dvx` CLI provides these commands:
 - [ ] Task 1: Description
 - [ ] Task 2: Description
 ```
+
+## Queue File Format
+
+Run multiple plans sequentially with a YAML queue file:
+
+```yaml
+- plans/FIX-bug1.md
+- plans/FIX-bug2.md
+- plans/FIX-bug3.md
+```
+
+Use `/dvx:create-list` to generate queue files, then `dvx run queue.yaml`.
 
 ## State Directory
 

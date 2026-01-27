@@ -3,7 +3,9 @@ name = "dvx"
 version = "0.1.0"
 description = "Development orchestrator for automated implement/review/commit cycles"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+    "pyyaml>=6.0",
+]
 
 [project.optional-dependencies]
 dev = [

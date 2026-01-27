@@ -7,9 +7,12 @@ Automates the implement → review → test → commit development loop.
 
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Optional
+
+import yaml
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -251,6 +254,80 @@ This ensures all changes are isolated and can be reviewed before merging."""
     return True, ""
 
 
+def is_queue_file(filepath: str) -> bool:
+    """Check if the file is a YAML queue file."""
+    return filepath.endswith(('.yaml', '.yml'))
+
+
+def load_queue(queue_file: str) -> list[str]:
+    """Load the list of plan files from a YAML queue file."""
+    with open(queue_file, 'r') as f:
+        data = yaml.safe_load(f)
+
+    # Support both a plain list and a dict with a 'plans' key
+    if isinstance(data, list):
+        return data
+    elif isinstance(data, dict) and 'plans' in data:
+        return data['plans']
+    else:
+        raise ValueError("Invalid queue file format: expected a list or dict with 'plans' key")
+
+
+def save_queue(queue_file: str, plans: list[str]) -> None:
+    """Save the remaining plans to a YAML queue file."""
+    Path(queue_file).parent.mkdir(parents=True, exist_ok=True)
+    with open(queue_file, 'w') as f:
+        yaml.dump(plans, f, default_flow_style=False)
+
+
+def get_continuation_queue_path(plan_file: str, original_queue_name: str) -> str:
+    """Get the path where the continuation queue should be saved."""
+    dvx_dir = get_dvx_dir(plan_file)
+    return str(dvx_dir / original_queue_name)
+
+
+def find_continuation_queue(plan_file: str) -> Optional[str]:
+    """Find a continuation queue file in the plan's .dvx directory."""
+    dvx_dir = get_dvx_dir(plan_file)
+    if not dvx_dir.exists():
+        return None
+
+    # Look for any .yaml or .yml file
+    for f in dvx_dir.iterdir():
+        if f.suffix in ('.yaml', '.yml') and f.is_file():
+            return str(f)
+
+    return None
+
+
+def run_with_continuation(plan_file: str, step_mode: bool = False) -> int:
+    """
+    Run orchestrator and handle continuation queue on success.
+
+    If the plan completes successfully and there's a continuation queue,
+    re-exec dvx to process the next plan in the queue.
+    """
+    result = run_orchestrator(plan_file, step_mode=step_mode)
+
+    if result == 0:
+        # Plan completed successfully - check for continuation
+        continuation = find_continuation_queue(plan_file)
+        if continuation:
+            print()
+            print("=" * 60)
+            print("CONTINUING TO NEXT PLAN IN QUEUE")
+            print("=" * 60)
+            print(f"Continuation queue: {continuation}")
+            print()
+
+            # Re-exec ourselves with the continuation queue
+            # Using os.execv replaces this process entirely
+            python = sys.executable
+            os.execv(python, [python, __file__, 'run', continuation])
+
+    return result
+
+
 def cmd_run(args) -> int:
     """
     Run orchestration - handles all states automatically.
@@ -259,6 +336,7 @@ def cmd_run(args) -> int:
     - Blocked: launches interactive Claude session to resolve, then continues
     - Paused: continues to next task
     - In progress: continues orchestration
+    - YAML queue: process files in sequence, continuing on success
     """
     # Verify git environment
     ok, error = check_git_environment()
@@ -266,7 +344,45 @@ def cmd_run(args) -> int:
         print(f"Error: {error}")
         return 1
 
-    plan_file = str(Path(args.plan_file))
+    input_file = str(Path(args.plan_file))
+
+    # Handle YAML queue file
+    if is_queue_file(input_file):
+        if not Path(input_file).exists():
+            print(f"Error: Queue file not found: {input_file}")
+            return 1
+
+        try:
+            plans = load_queue(input_file)
+        except Exception as e:
+            print(f"Error loading queue file: {e}")
+            return 1
+
+        if not plans:
+            print("Queue is empty - all plans completed!")
+            # Clean up the queue file
+            Path(input_file).unlink()
+            return 0
+
+        # Pop the first plan
+        plan_file = plans[0]
+        remaining = plans[1:]
+
+        print(f"Queue: {len(plans)} plans remaining")
+        print(f"  Next: {plan_file}")
+        if remaining:
+            print(f"  After: {', '.join(remaining[:3])}{'...' if len(remaining) > 3 else ''}")
+        print()
+
+        # Save remaining plans to .dvx/{plan_file}/{queue_name}.yaml
+        queue_name = Path(input_file).name
+        if remaining:
+            continuation_path = get_continuation_queue_path(plan_file, queue_name)
+            save_queue(continuation_path, remaining)
+            print(f"Remaining queue saved to: {continuation_path}")
+            print()
+    else:
+        plan_file = input_file
 
     if not Path(plan_file).exists():
         print(f"Error: Plan file not found: {plan_file}")
@@ -325,7 +441,7 @@ def cmd_run(args) -> int:
         if sync_result['synced'] > 0 or sync_result['added'] > 0:
             print(f"  Updated: {sync_result['synced']} synced, {sync_result['added']} added from plan markers")
 
-        return run_orchestrator(state.plan_file, step_mode=state.step_mode)
+        return run_with_continuation(state.plan_file, step_mode=state.step_mode)
 
     # === PLANNER: Sync state with plan file ===
     # This ensures the status tracking file matches the plan's [x] markers.
@@ -362,19 +478,33 @@ def cmd_run(args) -> int:
         print("=" * 60)
         print()
 
-        return run_orchestrator(plan_file, step_mode=step_mode)
+        return run_with_continuation(plan_file, step_mode=step_mode)
 
     elif state.phase == Phase.PAUSED.value:
         print(f"Resuming from step-mode pause: {state.plan_file}")
         print()
 
         update_phase(Phase.IDLE, plan_file)
-        return run_orchestrator(state.plan_file, step_mode=state.step_mode)
+        return run_with_continuation(state.plan_file, step_mode=state.step_mode)
 
     elif state.phase == Phase.COMPLETE.value:
         print(f"Plan already complete: {state.plan_file}")
         summary = get_plan_summary(state.plan_file)
         print(f"All {summary['total']} tasks done!")
+
+        # Check for continuation queue even when already complete
+        continuation = find_continuation_queue(plan_file)
+        if continuation:
+            print()
+            print("=" * 60)
+            print("CONTINUING TO NEXT PLAN IN QUEUE")
+            print("=" * 60)
+            print(f"Continuation queue: {continuation}")
+            print()
+
+            python = sys.executable
+            os.execv(python, [python, __file__, 'run', continuation])
+
         return 0
 
     else:
@@ -389,7 +519,7 @@ def cmd_run(args) -> int:
             print("Step mode enabled")
             print()
 
-        return run_orchestrator(state.plan_file, step_mode=state.step_mode)
+        return run_with_continuation(state.plan_file, step_mode=state.step_mode)
 
 
 def cmd_status(args) -> int:
