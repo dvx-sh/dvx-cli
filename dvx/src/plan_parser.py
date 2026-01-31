@@ -258,6 +258,12 @@ def _parse_with_claude(filepath: Path) -> list[Task]:
         _compress_plan_file(filepath)
         content = filepath.read_text()  # Re-read compressed content
 
+    # Calculate timeout based on file size (minimum 180s, scale with tokens)
+    # Large files need more time for Claude to process
+    base_timeout = 180
+    tokens_timeout = tokens // 100  # Add 1 second per 100 tokens
+    parse_timeout = min(base_timeout + tokens_timeout, 600)  # Cap at 10 minutes
+
     prompt = f"""Analyze this plan file and extract all tasks/phases/steps that need to be implemented.
 
 PLAN FILE CONTENT:
@@ -295,8 +301,10 @@ Important:
 - Return an empty tasks array if no actionable tasks are found
 """
 
-    logger.info(f"Parsing plan with Claude: {filepath}")
-    result = run_claude(prompt, timeout=120)
+    logger.info(f"Parsing plan with Claude: {filepath} (timeout: {parse_timeout}s)")
+    # Disable tools to prevent Claude from trying to read files instead of
+    # processing the plan content we already provided in the prompt
+    result = run_claude(prompt, timeout=parse_timeout, disable_tools=True)
 
     if not result.success:
         logger.error(f"Claude parsing failed: {result.output}")

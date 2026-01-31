@@ -166,6 +166,7 @@ def run_claude(
     timeout: int = 1200,
     model: Optional[str] = None,
     append_system_prompt: Optional[str] = None,
+    disable_tools: bool = False,
 ) -> SessionResult:
     """
     Run Claude Code with the given prompt.
@@ -177,6 +178,7 @@ def run_claude(
         timeout: Timeout in seconds (default 20 minutes)
         model: Optional model to use (e.g., 'opus', 'sonnet')
         append_system_prompt: Optional text to append to system prompt
+        disable_tools: If True, disable all tools (useful for pure text extraction)
 
     Returns:
         SessionResult with output, session_id, and status
@@ -184,6 +186,9 @@ def run_claude(
     cwd = cwd or os.getcwd()
 
     cmd = ['claude', '--dangerously-skip-permissions', '--output-format', 'stream-json', '--verbose']
+
+    if disable_tools:
+        cmd.extend(['--tools', ''])
 
     if model:
         cmd.extend(['--model', model])
