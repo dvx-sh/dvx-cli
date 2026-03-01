@@ -121,9 +121,13 @@ def _parse_stream_output(events: list[dict]) -> tuple[str, Optional[str], bool, 
     - session_id: UUID of the session
     - result: The text response
 
+    Falls back to collecting text from assistant events when the result event
+    is missing or empty (e.g., rate-limited sessions that terminate early).
+
     Returns: (text_output, session_id, is_blocked, block_reason)
     """
     text_output = ""
+    streamed_text_parts = []
     session_id = None
     is_blocked = False
     block_reason = None
@@ -136,12 +140,27 @@ def _parse_stream_output(events: list[dict]) -> tuple[str, Optional[str], bool, 
         if 'session_id' in data:
             session_id = data['session_id']
 
+        # Collect text from assistant message content blocks as fallback
+        if data.get('type') == 'assistant':
+            message = data.get('message', {})
+            content = message.get('content', [])
+            if isinstance(content, list):
+                for block in content:
+                    if block.get('type') == 'text':
+                        streamed_text_parts.append(block.get('text', ''))
+
         # The 'result' event contains the final output
         if data.get('type') == 'result':
             text_output = data.get('result', '')
             if 'session_id' in data:
                 session_id = data['session_id']
             logger.debug(f"Parsed session_id from result: {session_id}")
+
+    # Fall back to streamed text if result event was empty/missing
+    # (happens when rate limits truncate the session)
+    if not text_output and streamed_text_parts:
+        text_output = '\n'.join(streamed_text_parts)
+        logger.warning(f"No result event; recovered {len(text_output)} chars from streamed text")
 
     # Check for block signals in the text output
     check_text = text_output

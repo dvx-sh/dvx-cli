@@ -304,27 +304,48 @@ Important:
     logger.info(f"Parsing plan with Claude: {filepath} (timeout: {parse_timeout}s)")
     # Disable tools to prevent Claude from trying to read files instead of
     # processing the plan content we already provided in the prompt
-    result = run_claude(prompt, timeout=parse_timeout, disable_tools=True)
 
-    if not result.success:
-        logger.error(f"Claude parsing failed: {result.output}")
-        raise RuntimeError(f"Failed to parse plan with Claude: {result.block_reason or 'unknown error'}")
+    # Retry logic for intermittent empty responses
+    max_retries = 3
 
-    # Parse the JSON response
-    output = result.output.strip()
+    for attempt in range(max_retries):
+        result = run_claude(prompt, timeout=parse_timeout, disable_tools=True)
 
-    # Try to extract JSON from the output (Claude might add some text)
-    json_start = output.find('{')
-    json_end = output.rfind('}') + 1
-    if json_start >= 0 and json_end > json_start:
-        output = output[json_start:json_end]
+        if not result.success:
+            logger.error(f"Claude parsing failed: {result.output}")
+            raise RuntimeError(f"Failed to parse plan with Claude: {result.block_reason or 'unknown error'}")
 
-    try:
-        data = json.loads(output)
-    except json.JSONDecodeError as e:
-        logger.error(f"Failed to parse Claude's JSON response: {e}")
-        logger.error(f"Raw output: {output[:500]}")
-        raise RuntimeError(f"Claude returned invalid JSON: {e}")
+        # Parse the JSON response
+        output = result.output.strip()
+
+        # Check for empty output and retry
+        if not output:
+            logger.warning(f"Claude returned empty output (attempt {attempt + 1}/{max_retries})")
+            if attempt < max_retries - 1:
+                import time
+                time.sleep(2)  # Brief delay before retry
+                continue
+            else:
+                raise RuntimeError("Claude returned empty output after all retries")
+
+        # Try to extract JSON from the output (Claude might add some text)
+        json_start = output.find('{')
+        json_end = output.rfind('}') + 1
+        if json_start >= 0 and json_end > json_start:
+            output = output[json_start:json_end]
+
+        try:
+            data = json.loads(output)
+            break  # Success - exit retry loop
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse Claude's JSON response (attempt {attempt + 1}/{max_retries}): {e}")
+            logger.error(f"Raw output: {output[:500]}")
+            if attempt < max_retries - 1:
+                import time
+                time.sleep(2)
+                continue
+            else:
+                raise RuntimeError(f"Claude returned invalid JSON: {e}")
 
     tasks = []
     for t in data.get('tasks', []):
