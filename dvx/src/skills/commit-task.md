@@ -18,6 +18,13 @@ arguments:
 
 The implementation for task $ARGUMENTS.task_id ($ARGUMENTS.task_title) has been reviewed and approved.
 
+## Standalone Mode
+
+If the arguments above are empty or missing (e.g., this skill was invoked by Claude without the dvx CLI), infer context from the conversation:
+- Identify the completed task from the user's message or recent conversation
+- Read the plan file referenced in the conversation
+- Identify the most recently completed task (last one discussed or implemented)
+
 ## Instructions
 
 ### 1. Update Plan File

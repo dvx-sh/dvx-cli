@@ -27,6 +27,16 @@ You are implementing task $ARGUMENTS.task_id from the plan file $ARGUMENTS.plan_
 
 $ARGUMENTS.task_description
 
+## Standalone Mode
+
+If the arguments above are empty or missing (e.g., this skill was invoked by Claude without the dvx CLI), infer context from the conversation:
+- Use the plan file referenced in the user's message
+- Read the plan file and identify the first incomplete task (unchecked `[ ]` item)
+- Implement that one task only
+- After completing it, stop and ask the user before proceeding to the next task
+
+This replicates the task-by-task workflow that dvx orchestrates externally.
+
 ## Instructions
 
 1. **Read the plan file** to understand the full context of this task and how it fits into the larger work.

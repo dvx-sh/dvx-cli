@@ -19,6 +19,10 @@ Write a detailed implementation plan based on the requirements below.
 
 $ARGUMENTS.requirements
 
+## Standalone Mode
+
+If the requirements above are empty or missing (e.g., this skill was invoked by Claude without the dvx CLI), infer requirements from the user's message or recent conversation context.
+
 ## Plan Structure
 
 Create a markdown plan with this structure:

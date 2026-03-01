@@ -40,6 +40,12 @@ $ARGUMENTS.blocked_reason
 
 $ARGUMENTS.context
 
+## Standalone Mode
+
+If the arguments above are empty or missing (e.g., this skill was invoked by Claude without the dvx CLI), infer context from the conversation:
+- Identify the plan file, task, and blocking reason from the user's message or recent conversation
+- Read the plan file for full context
+
 ## Instructions
 
 ### 1. Explain the Issue

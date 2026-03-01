@@ -34,6 +34,12 @@ $ARGUMENTS.task_description
 
 $ARGUMENTS.plan_content
 
+## Standalone Mode
+
+If the arguments above are empty or missing (e.g., this skill was invoked by Claude without the dvx CLI), infer context from the conversation:
+- Identify the task and plan file from the user's message or recent conversation
+- Read the plan file to get full plan content and task details
+
 ## Analysis Criteria
 
 A task should be split if ANY of these apply:

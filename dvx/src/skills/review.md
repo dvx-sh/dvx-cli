@@ -31,6 +31,13 @@ You are reviewing the implementation of task $ARGUMENTS.task_id from plan file $
 $ARGUMENTS.git_diff
 ```
 
+## Standalone Mode
+
+If the arguments above are empty or missing (e.g., this skill was invoked by Claude without the dvx CLI), infer context from the conversation:
+- Identify the task and plan file from the user's message or recent conversation
+- Read the plan file to understand the task being reviewed
+- Run `git diff` to get the changes (use `git diff HEAD~1` for the last commit, or `git diff main...HEAD` for all branch changes)
+
 ## Review Checklist
 
 Please evaluate the changes against these criteria:

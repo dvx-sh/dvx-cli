@@ -36,6 +36,12 @@ Use extended thinking to deeply reason through this situation before making a de
 
 $ARGUMENTS.context
 
+## Standalone Mode
+
+If the arguments above are empty or missing (e.g., this skill was invoked by Claude without the dvx CLI), infer context from the conversation:
+- Identify the task, trigger source, and reason from the user's message or recent conversation
+- Read the plan file referenced in the conversation for full context
+
 ## Your Mission
 
 You have been called because the $ARGUMENTS.trigger_source flagged a potential issue. Your job is to:

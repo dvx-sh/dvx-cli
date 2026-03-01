@@ -33,6 +33,14 @@ Use extended thinking to deeply analyze the work before making your decision.
 
 $ARGUMENTS.plan_content
 
+## Standalone Mode
+
+If the arguments above are empty or missing (e.g., this skill was invoked by Claude without the dvx CLI), infer context from the conversation:
+- Identify the plan file from the user's message or recent conversation
+- Read the plan file to get plan content
+- Detect the current branch with `git branch --show-current`
+- Use `main` as the base branch unless the conversation indicates otherwise
+
 ## Your Mission
 
 You have NO context from the implementation sessions. You must establish understanding by:

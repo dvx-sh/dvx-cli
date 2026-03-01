@@ -22,6 +22,13 @@ The reviewer noted that tests are missing for task $ARGUMENTS.task_id ($ARGUMENT
 
 $ARGUMENTS.reviewer_notes
 
+## Standalone Mode
+
+If the arguments above are empty or missing (e.g., this skill was invoked by Claude without the dvx CLI), infer context from the conversation:
+- Identify the task and reviewer notes from the user's message or recent conversation
+- Read the plan file referenced in the conversation to understand the task
+- If no specific reviewer notes exist, analyze the implementation to identify missing test coverage
+
 ## Instructions
 
 ### 1. Analyze What Needs Testing

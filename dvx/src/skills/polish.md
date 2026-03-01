@@ -30,6 +30,13 @@ $ARGUMENTS.git_diff
 
 $ARGUMENTS.plan_content
 
+## Standalone Mode
+
+If the arguments above are empty or missing (e.g., this skill was invoked by Claude without the dvx CLI), infer context from the conversation:
+- Identify the plan file from the user's message or recent conversation
+- Read the plan file to get plan content
+- Run `git diff main...HEAD` (or appropriate base branch) to get the diff
+
 ## Core Principle
 
 **Preserve Functionality**: Never change what the code does - only how it does it. All original features, outputs, and behaviors must remain intact.

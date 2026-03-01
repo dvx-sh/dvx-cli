@@ -30,6 +30,13 @@ $ARGUMENTS.existing_content
 
 $ARGUMENTS.changes
 
+## Standalone Mode
+
+If the arguments above are empty or missing (e.g., this skill was invoked by Claude without the dvx CLI), infer context from the conversation:
+- Identify the plan file from the user's message or recent conversation
+- Read the plan file to get existing content
+- Identify the requested changes from the user's message
+
 ## Instructions
 
 1. Read and understand the existing plan structure

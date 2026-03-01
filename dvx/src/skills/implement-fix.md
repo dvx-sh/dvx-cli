@@ -39,6 +39,12 @@ The reviewer has provided the following feedback that needs to be addressed:
 $ARGUMENTS.feedback
 ---
 
+## Standalone Mode
+
+If the arguments above are empty or missing (e.g., this skill was invoked by Claude without the dvx CLI), infer context from the conversation:
+- Identify the task and review feedback from the user's message or recent conversation
+- Read the plan file referenced in the conversation for full context
+
 ## Instructions
 
 1. **Carefully read** the feedback above.
