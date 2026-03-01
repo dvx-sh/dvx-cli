@@ -54,18 +54,28 @@ This replicates the task-by-task workflow that dvx orchestrates externally.
    - Do NOT re-implement or modify the existing implementation
    - Stop here - do not proceed to implementation
 
-4. **Implement the task** (only if not already complete):
+4. **Check if task needs splitting**: After reading the plan and relevant code, assess whether this task is too large for a single implementation pass. The task needs splitting if ANY of these apply:
+   - It requires changes to 3+ unrelated files or systems
+   - The scope is vague (e.g., "implement feature X" without specifics)
+   - It has multiple sequential dependencies that build on each other
+   - A reviewer would need to evaluate multiple unrelated concerns
+
+   **If the task needs splitting**:
+   - Output `[NEEDS_SPLIT]` with a brief reason explaining why it's too large
+   - Stop here - do not attempt implementation
+
+5. **Implement the task** (only if not already complete and not needs-split):
    - Follow existing code patterns and conventions
    - Write clean, well-structured code
    - Include appropriate error handling
    - Add tests for new functionality (this is required, not optional)
 
-5. **When making decisions**:
+6. **When making decisions**:
    - If there's a clear recommended approach, take it and note your decision
    - If the decision is significant, write a brief note explaining your choice
    - Only block (output [BLOCKED: reason]) if there's a truly critical question with no clear answer
 
-6. **After implementation**:
+7. **After implementation**:
    - Run any relevant tests to ensure your changes work
    - Do NOT commit yet - that will happen after review
 

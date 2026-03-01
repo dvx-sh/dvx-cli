@@ -617,6 +617,16 @@ def is_already_complete(output: str) -> bool:
     return "[already_complete]" in output.lower()
 
 
+def needs_split(output: str) -> bool:
+    """
+    Check if implementer determined the task needs splitting.
+
+    The implementer outputs [NEEDS_SPLIT] when it assesses the task
+    is too large for a single implementation pass.
+    """
+    return "[needs_split]" in output.lower()
+
+
 def get_branch_info() -> tuple[str, str]:
     """
     Get current branch and base branch (main or master).
@@ -1370,49 +1380,13 @@ def _run_orchestrator_inner(plan_file: str, step_mode: bool = False) -> int:
             update_task_status(plan_file, task.id, TaskStatus.BLOCKED)
             continue
 
-        # === TASK SPLITTING CHECK ===
-        # Analyze if this task is too complex and should be split
-        print("  Analyzing task complexity...")
-
-        split_result = run_task_splitter(task, plan_file)
-
-        if split_result.success:
-            split_analysis = parse_split_result(split_result.output)
-
-            if split_analysis["should_split"] and split_analysis["subtasks"]:
-                print(f"  Task {task.id} is too complex - splitting into subtasks...")
-                logger.info(f"Splitting task {task.id} into subtasks")
-
-                # Apply the split to the plan file
-                apply_result = apply_task_split(plan_file, task, split_analysis["subtasks"])
-
-                if apply_result.success:
-                    print("  Plan updated with subtasks. Restarting with first subtask...")
-
-                    # Mark the parent task as done (it's been replaced by subtasks)
-                    update_task_status(plan_file, task.id, TaskStatus.DONE)
-
-                    # Clear the cache so we re-parse the plan
-                    from plan_parser import clear_cache
-                    clear_cache()
-
-                    # Continue to pick up the first subtask
-                    continue
-                else:
-                    logger.warning(f"Failed to apply task split: {apply_result.block_reason}")
-                    print("  Failed to update plan - proceeding with original task")
-            else:
-                print("  Task is appropriately scoped")
-        else:
-            logger.warning(f"Task splitter failed: {split_result.block_reason}")
-            print("  Skipping complexity analysis - proceeding with task")
-
         # Set current task
         set_current_task(task.id, task.title, plan_file)
         update_task_status(plan_file, task.id, TaskStatus.IN_PROGRESS)
 
         # === IMPLEMENTATION PHASE ===
         update_phase(Phase.IMPLEMENTING, plan_file)
+        print(f"  Implementing task {task.id}...")
         logger.info(f"Implementing task {task.id}")
 
         impl_result = run_implementer(task, plan_file)
@@ -1433,6 +1407,38 @@ def _run_orchestrator_inner(plan_file: str, step_mode: bool = False) -> int:
 
             # Continue to next task (skip review/fix/test/commit)
             continue
+
+        # Check if implementer determined the task needs splitting
+        if needs_split(impl_result.output):
+            print(f"  Task {task.id} needs splitting - running task splitter...")
+            logger.info(f"Task {task.id} flagged as needing split by implementer")
+
+            split_result = run_task_splitter(task, plan_file)
+
+            if split_result.success:
+                split_analysis = parse_split_result(split_result.output)
+
+                if split_analysis["should_split"] and split_analysis["subtasks"]:
+                    print(f"  Splitting task {task.id} into subtasks...")
+                    apply_result = apply_task_split(plan_file, task, split_analysis["subtasks"])
+
+                    if apply_result.success:
+                        print("  Plan updated with subtasks. Restarting with first subtask...")
+                        update_task_status(plan_file, task.id, TaskStatus.DONE)
+
+                        from plan_parser import clear_cache
+                        clear_cache()
+
+                        continue
+                    else:
+                        logger.warning(f"Failed to apply task split: {apply_result.block_reason}")
+                        print("  Failed to update plan - proceeding with review")
+                else:
+                    logger.info("Splitter decided task doesn't need splitting after all")
+                    print("  Splitter determined task is appropriately scoped - proceeding with review")
+            else:
+                logger.warning(f"Task splitter failed: {split_result.block_reason}")
+                print("  Split analysis failed - proceeding with review")
 
         if not impl_result.success or impl_result.blocked:
             reason = impl_result.block_reason or ("Implementation failed" if not impl_result.success else "Implementer is blocked")
