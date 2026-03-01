@@ -475,6 +475,64 @@ class TestParseStreamOutput:
         assert blocked is True
         assert reason == 'This is a multi-word reason here'
 
+    def test_fallback_to_streamed_text_when_no_result_event(self):
+        """Recover text from assistant events when rate limits truncate the session."""
+        events = [
+            {'type': 'system', 'session_id': 'abc-123'},
+            {'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': '{"tasks": [{"id": "1"}]}'}]}},
+        ]
+
+        text, session_id, blocked, reason = _parse_stream_output(events)
+
+        assert text == '{"tasks": [{"id": "1"}]}'
+        assert session_id == 'abc-123'
+
+    def test_fallback_joins_multiple_text_blocks(self):
+        """Multiple assistant text events are joined when result is missing."""
+        events = [
+            {'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': 'Part 1'}]}},
+            {'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': 'Part 2'}]}},
+        ]
+
+        text, session_id, blocked, reason = _parse_stream_output(events)
+
+        assert text == 'Part 1\nPart 2'
+
+    def test_result_event_takes_precedence_over_streamed_text(self):
+        """When result event exists, streamed text fallback is not used."""
+        events = [
+            {'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': 'Streamed partial'}]}},
+            {'type': 'result', 'result': 'Final result', 'session_id': 'abc'}
+        ]
+
+        text, session_id, blocked, reason = _parse_stream_output(events)
+
+        assert text == 'Final result'
+
+    def test_fallback_text_still_detects_blocked(self):
+        """Blocked markers in fallback text should be detected."""
+        events = [
+            {'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': '[BLOCKED: rate limited]'}]}},
+        ]
+
+        text, session_id, blocked, reason = _parse_stream_output(events)
+
+        assert blocked is True
+        assert reason == 'rate limited'
+
+    def test_fallback_skips_non_text_content_blocks(self):
+        """Tool use blocks in assistant events should not be collected."""
+        events = [
+            {'type': 'assistant', 'message': {'content': [
+                {'type': 'tool_use', 'name': 'Read', 'input': {}},
+                {'type': 'text', 'text': 'Only this text'},
+            ]}},
+        ]
+
+        text, session_id, blocked, reason = _parse_stream_output(events)
+
+        assert text == 'Only this text'
+
 
 class TestSessionResult:
     """Tests for SessionResult dataclass."""
