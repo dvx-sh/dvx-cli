@@ -182,7 +182,7 @@ def run_claude(
     prompt: str,
     cwd: Optional[str] = None,
     session_id: Optional[str] = None,
-    timeout: int = 1200,
+    timeout: int = 1800,
     model: Optional[str] = None,
     append_system_prompt: Optional[str] = None,
     disable_tools: bool = False,
@@ -194,7 +194,7 @@ def run_claude(
         prompt: The prompt to send to Claude
         cwd: Working directory (defaults to current)
         session_id: Optional session ID to resume
-        timeout: Timeout in seconds (default 20 minutes)
+        timeout: Timeout in seconds (default 30 minutes)
         model: Optional model to use (e.g., 'opus', 'sonnet')
         append_system_prompt: Optional text to append to system prompt
         disable_tools: If True, disable all tools (useful for pure text extraction)
