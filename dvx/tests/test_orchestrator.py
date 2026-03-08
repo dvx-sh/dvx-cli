@@ -369,6 +369,53 @@ Fix these before merge.
         assert "Security vulnerability" in result["issues"][0]
         assert "Performance" in result["issues"][1]
 
+    # === SUGGESTIONS TESTS ===
+
+    def test_suggestions_marker(self):
+        """[SUGGESTIONS] marker should set has_suggestions=True."""
+        result = parse_finalizer_result("""
+[SUGGESTIONS]
+
+## Quick Wins (Implement Now)
+
+1. Remove unused import
+   - File: src/api.py
+   - Priority: LOW
+""")
+        assert result["approved"] is False
+        assert result["has_issues"] is False
+        assert result["has_suggestions"] is True
+        assert result["suggestions"] != ""
+
+    def test_suggestions_not_approved(self):
+        """[SUGGESTIONS] should not count as approved."""
+        result = parse_finalizer_result("[SUGGESTIONS]\n\n## Quick Wins\n1. Cleanup")
+        assert result["approved"] is False
+        assert result["has_suggestions"] is True
+
+    def test_issues_override_suggestions(self):
+        """If both [ISSUES] and [SUGGESTIONS] present, issues takes precedence."""
+        result = parse_finalizer_result("[SUGGESTIONS]\n[ISSUES]\n### Issue 1: Bug")
+        assert result["has_issues"] is True
+        assert result["has_suggestions"] is False
+
+    def test_suggestions_case_insensitive(self):
+        """[suggestions] marker should be case insensitive."""
+        result = parse_finalizer_result("[suggestions]\n## Quick Wins\n1. Cleanup")
+        assert result["has_suggestions"] is True
+
+    def test_no_suggestions_by_default(self):
+        """No markers should default to no suggestions."""
+        result = parse_finalizer_result("Some analysis without clear decision.")
+        assert result["has_suggestions"] is False
+        assert result["suggestions"] == ""
+
+    def test_approved_not_suggestions(self):
+        """[APPROVED] alone should not have suggestions."""
+        result = parse_finalizer_result("[APPROVED]\nAll good!")
+        assert result["has_suggestions"] is False
+        assert result["suggestions"] == ""
+
 
 class TestIsAlreadyComplete:
     """Tests for is_already_complete detection."""

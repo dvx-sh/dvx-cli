@@ -41,6 +41,10 @@ If the arguments above are empty or missing (e.g., this skill was invoked by Cla
 - Detect the current branch with `git branch --show-current`
 - Use `main` as the base branch unless the conversation indicates otherwise
 
+## Core Principle
+
+**Preserve Functionality**: Never change what the code does - only how it does it. All original features, outputs, and behaviors must remain intact.
+
 ## Your Mission
 
 You have NO context from the implementation sessions. You must establish understanding by:
@@ -55,10 +59,25 @@ You have NO context from the implementation sessions. You must establish underst
 
 ### Code Quality
 - [ ] Code follows existing patterns and conventions in the codebase
+- [ ] Code follows project-specific standards defined in CLAUDE.md
 - [ ] Code quality is at or above the standard of surrounding code
 - [ ] No obvious bugs, security issues, or performance problems
 - [ ] Error handling is appropriate
 - [ ] No leftover debug code, TODOs that should be addressed, or commented-out code
+
+### Architecture & Design
+- [ ] Overall design makes sense
+- [ ] No unnecessary complexity that could be simplified
+- [ ] Naming is consistent across the implementation
+- [ ] Similar operations are handled similarly
+
+### Anti-Patterns to Flag
+Watch for these common issues:
+- **Nested ternaries** → prefer switch statements or if/else chains
+- **Overly clever one-liners** → clarity over brevity
+- **Too many concerns in one function** → single responsibility
+- **Premature abstractions** → don't abstract for hypothetical future needs
+- **Dense code prioritizing "fewer lines"** → explicit is better than compact
 
 ### Completeness
 - [ ] All tasks in the plan are marked complete
@@ -80,6 +99,11 @@ You have NO context from the implementation sessions. You must establish underst
 - [ ] Commit messages are clear and follow project conventions
 - [ ] No accidentally committed files (secrets, build artifacts, etc.)
 - [ ] Changes are logically organized
+
+### Polish Opportunities
+- [ ] Any dead code or unused imports to clean up?
+- [ ] Any quick wins that would improve quality?
+- [ ] Any obvious refactoring that would help?
 
 ## Commands to Run
 
@@ -123,6 +147,30 @@ List of commits and brief assessment of each.
 Confirmation that this branch is ready.
 ```
 
+### If optional improvements exist (not blocking merge):
+
+```
+[SUGGESTIONS]
+
+## Summary
+Brief description of what was implemented.
+
+## Quick Wins (Implement Now)
+
+1. [Description]
+   - File: path/to/file
+   - What to change
+   - Priority: HIGH/MEDIUM/LOW
+
+## Deferred Work (Create FIX Files)
+
+1. [Title for FIX file]
+   - Problem: What needs improving
+   - Solution: How to fix it
+   - Files affected: list of files
+   - Priority: HIGH/MEDIUM/LOW
+```
+
 ### If issues were found that need fixing:
 
 ```
@@ -146,6 +194,14 @@ Brief description of what was implemented.
 The orchestrator will run additional implement-review cycles to address these issues.
 ```
 
+## Categorization Guide
+
+- **[APPROVED]** — clean, ready for merge as-is
+- **[SUGGESTIONS]** — optional improvements to apply before merge (quick wins and deferred FIX files). Use when the code works correctly but could be improved.
+- **[ISSUES]** — bugs, test failures, or problems that block merge. Use when something is actually broken or wrong.
+
+Be conservative: when in doubt between [SUGGESTIONS] and [ISSUES], prefer [SUGGESTIONS]. Quick wins should be low-risk, obvious improvements. Deferred work goes to FIX files.
+
 ## Guidelines
 
 - Be thorough but fair - don't nitpick style if it matches existing code
@@ -162,6 +218,6 @@ If you fix any issues during your review (formatting, linting, small bugs, etc.)
 1. **You MUST commit those changes** before outputting your final decision
 2. Stage the changes: `git add -A`
 3. Commit with a clear message: `git commit -m "fix: [description of what was fixed]"`
-4. Then output [APPROVED] or [ISSUES] as appropriate
+4. Then output [APPROVED], [SUGGESTIONS], or [ISSUES] as appropriate
 
 Do NOT leave uncommitted changes - the orchestrator expects a clean working tree after finalization.
