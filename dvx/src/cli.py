@@ -855,7 +855,7 @@ def cmd_watch(args) -> int:
     destination = completed_plan
     print(f"Moved completed plan to: {destination}")
 
-    ok, committed = commit_watch_completion(todo_file, destination)
+    ok, committed = commit_watch_completion(run_plan, destination)
     if not ok:
         print(f"Error: {committed}")
         return 1

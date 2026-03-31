@@ -345,7 +345,7 @@ class TestWatchCommand:
 
         assert run_calls == [Path("doing/PLAN-migrate-x-to-y.md")]
         assert commit_calls == [
-            (Path("todo/PLAN-migrate-x-to-y.md"), Path("done/PLAN-migrate-x-to-y.md"))
+            (Path("doing/PLAN-migrate-x-to-y.md"), Path("done/PLAN-migrate-x-to-y.md"))
         ]
 
     def test_watch_fails_when_branch_already_exists(self, monkeypatch):
@@ -469,7 +469,7 @@ class TestWatchCompletion:
         """Should commit the completed plan move when done/ is tracked."""
         monkeypatch.chdir(self.temp_dir)
 
-        source = Path("todo/PLAN-migrate-x-to-y.md")
+        source = Path("doing/PLAN-migrate-x-to-y.md")
         source.parent.mkdir(parents=True)
         source.write_text("# plan\n")
         run_git(["add", str(source)], self.temp_dir)
@@ -490,7 +490,7 @@ class TestWatchCompletion:
         """Should commit only the watched plan move and leave other staged changes alone."""
         monkeypatch.chdir(self.temp_dir)
 
-        source = Path("todo/PLAN-migrate-x-to-y.md")
+        source = Path("doing/PLAN-migrate-x-to-y.md")
         source.parent.mkdir(parents=True)
         source.write_text("# plan\n")
         run_git(["add", str(source)], self.temp_dir)
@@ -510,9 +510,9 @@ class TestWatchCompletion:
         assert committed is True
         assert run_git(["log", "-1", "--pretty=%s"], self.temp_dir) == "watch: move PLAN-migrate-x-to-y.md to done"
         assert run_git(["status", "--short"], self.temp_dir) == "A  notes.txt"
-        assert run_git(["diff-tree", "--no-commit-id", "--name-status", "-r", "HEAD"], self.temp_dir).splitlines() == [
+        assert sorted(run_git(["diff-tree", "--no-commit-id", "--name-status", "-r", "HEAD"], self.temp_dir).splitlines()) == [
             "A\tdone/PLAN-migrate-x-to-y.md",
-            "D\ttodo/PLAN-migrate-x-to-y.md",
+            "D\tdoing/PLAN-migrate-x-to-y.md",
         ]
 
 
