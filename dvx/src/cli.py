@@ -8,7 +8,10 @@ Automates the implement → review → test → commit development loop.
 import argparse
 import logging
 import os
+import shutil
+import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -218,8 +221,6 @@ def check_git_environment() -> tuple[bool, str]:
 
     Returns: (ok, error_message)
     """
-    import subprocess
-
     # Check if we're in a git repository
     result = subprocess.run(
         ["git", "rev-parse", "--is-inside-work-tree"],
@@ -254,9 +255,260 @@ This ensures all changes are isolated and can be reviewed before merging."""
     return True, ""
 
 
+def check_watch_git_environment() -> tuple[bool, str]:
+    """
+    Verify we're in a git repo and on a named branch.
+
+    Returns: (ok, branch_or_error_message)
+    """
+    result = subprocess.run(
+        ["git", "rev-parse", "--is-inside-work-tree"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return False, "Not in a git repository. dvx requires a git-managed project."
+
+    result = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return False, "Could not determine current git branch."
+
+    branch = result.stdout.strip()
+    if not branch or branch == "HEAD":
+        return False, "dvx watch requires a named branch, not a detached HEAD."
+
+    return True, branch
+
+
 def is_queue_file(filepath: str) -> bool:
     """Check if the file is a YAML queue file."""
     return filepath.endswith(('.yaml', '.yml'))
+
+
+def list_watch_files(todo_dir: Path) -> list[Path]:
+    """List regular files in the watch directory."""
+    if not todo_dir.exists():
+        return []
+
+    return sorted(
+        [path for path in todo_dir.iterdir() if path.is_file()],
+        key=lambda path: (path.stat().st_mtime_ns, path.name),
+    )
+
+
+def wait_for_new_todo_file(todo_dir: Path, poll_interval: float = 1.0) -> Path:
+    """
+    Return the oldest pending todo file, or wait for the next new one.
+
+    This lets a freshly started watcher process an existing backlog item
+    immediately, while still supporting the "wait for the next dropped file"
+    workflow when the directory starts empty.
+    """
+    todo_dir.mkdir(parents=True, exist_ok=True)
+    existing_files = list_watch_files(todo_dir)
+    if existing_files:
+        return existing_files[0]
+
+    known_files = {path.name for path in existing_files}
+
+    while True:
+        current_files = list_watch_files(todo_dir)
+        new_files = [path for path in current_files if path.name not in known_files]
+        if new_files:
+            return new_files[0]
+        time.sleep(poll_interval)
+
+
+def ensure_watch_directories(todo_dir: Path, doing_dir: Path, done_dir: Path) -> None:
+    """Create the watch workflow directories if they do not exist."""
+    todo_dir.mkdir(parents=True, exist_ok=True)
+    doing_dir.mkdir(parents=True, exist_ok=True)
+    done_dir.mkdir(parents=True, exist_ok=True)
+
+
+def validate_watch_branch_name(branch_name: str) -> tuple[bool, str]:
+    """Validate that a plan filename can become a git branch name."""
+    result = subprocess.run(
+        ["git", "check-ref-format", "--branch", branch_name],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return False, f"Invalid branch name derived from file: {branch_name}"
+    return True, ""
+
+
+def watch_branch_exists(branch_name: str) -> bool:
+    """Check whether a local branch already exists."""
+    result = subprocess.run(
+        ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch_name}"],
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0
+
+
+def create_watch_branch(start_branch: str, branch_name: str) -> tuple[bool, str]:
+    """Create the working branch for a watched plan."""
+    if watch_branch_exists(branch_name):
+        return False, f"Branch already exists: {branch_name}"
+
+    result = subprocess.run(
+        ["git", "checkout", "-b", branch_name, start_branch],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        error = result.stderr.strip() or result.stdout.strip() or "unknown git error"
+        return False, f"Failed to create branch {branch_name}: {error}"
+
+    return True, ""
+
+
+def move_watch_plan(todo_file: Path, doing_dir: Path) -> tuple[bool, Path | str]:
+    """Move the watched plan into the doing directory."""
+    doing_dir.mkdir(parents=True, exist_ok=True)
+    destination = doing_dir / todo_file.name
+
+    if destination.exists():
+        return False, f"Destination already exists: {destination}"
+
+    todo_file.rename(destination)
+    return True, destination
+
+
+def resolve_dvx_command() -> list[str]:
+    """Resolve the best command to invoke this dvx CLI again."""
+    argv0 = Path(sys.argv[0])
+    if sys.argv[0]:
+        if argv0.exists():
+            resolved = str(argv0.resolve())
+            if os.access(argv0, os.X_OK):
+                return [resolved]
+            return [sys.executable, resolved]
+        found = shutil.which(sys.argv[0])
+        if found:
+            return [found]
+
+    found = shutil.which("dvx")
+    if found:
+        return [found]
+
+    return [sys.executable, str(Path(__file__).resolve())]
+
+
+def run_watch_plan(plan_file: Path) -> tuple[int, str]:
+    """Run dvx run for the moved plan and wait for it to finish."""
+    command = [*resolve_dvx_command(), "run", str(plan_file)]
+
+    try:
+        result = subprocess.run(
+            command,
+            cwd=os.getcwd(),
+        )
+    except OSError as exc:
+        return 1, f"Failed to start dvx run for {plan_file}: {exc}"
+
+    return result.returncode, ""
+
+
+def validate_completed_watch_plan(plan_file: Path) -> tuple[bool, str]:
+    """Verify that a watched plan is fully done before it can move to done/."""
+    try:
+        summary = get_plan_summary(plan_file)
+    except FileNotFoundError:
+        return False, f"Watched plan is missing after dvx run: {plan_file}"
+
+    remaining = summary["pending"] + summary["in_progress"] + summary["blocked"]
+    if summary["total"] == 0 or remaining != 0 or summary["done"] != summary["total"]:
+        return (
+            False,
+            "Watched plan is not fully done "
+            f"(done={summary['done']}, pending={summary['pending']}, "
+            f"in_progress={summary['in_progress']}, blocked={summary['blocked']}).",
+        )
+
+    return True, ""
+
+
+def move_completed_watch_plan(plan_file: Path, done_dir: Path) -> tuple[bool, Path | str]:
+    """Move a successfully completed watched plan from doing/ to done/."""
+    done_dir.mkdir(parents=True, exist_ok=True)
+    destination = done_dir / plan_file.name
+
+    if destination.exists():
+        print(f"Error: Completed plan destination already exists: {destination}")
+        return False, f"Completed plan destination already exists: {destination}"
+
+    if not plan_file.exists():
+        return False, f"Completed plan not found for move to done: {plan_file}"
+
+    plan_file.rename(destination)
+    return True, destination
+
+
+def commit_watch_completion(source: Path, destination: Path) -> tuple[bool, bool | str]:
+    """
+    Commit the watched plan move when the destination is part of git tracking.
+
+    Returns:
+        (ok, committed_or_error)
+        committed_or_error is a bool when ok=True, otherwise an error string.
+    """
+    ignored_result = subprocess.run(
+        ["git", "check-ignore", "-q", str(destination)],
+        capture_output=True,
+        text=True,
+    )
+    if ignored_result.returncode == 0:
+        return True, False
+    if ignored_result.returncode not in (0, 1):
+        error = ignored_result.stderr.strip() or ignored_result.stdout.strip() or "unknown git error"
+        return False, f"Failed to check git ignore state for {destination}: {error}"
+
+    add_result = subprocess.run(
+        ["git", "add", "-A", "--", str(source), str(destination)],
+        capture_output=True,
+        text=True,
+    )
+    if add_result.returncode != 0:
+        error = add_result.stderr.strip() or add_result.stdout.strip() or "unknown git error"
+        return False, f"Failed to stage watched plan move: {error}"
+
+    diff_result = subprocess.run(
+        ["git", "diff", "--cached", "--quiet", "--", str(source), str(destination)],
+        capture_output=True,
+        text=True,
+    )
+    if diff_result.returncode == 0:
+        return True, False
+    if diff_result.returncode != 1:
+        error = diff_result.stderr.strip() or diff_result.stdout.strip() or "unknown git error"
+        return False, f"Failed to inspect staged watch completion changes: {error}"
+
+    commit_result = subprocess.run(
+        [
+            "git",
+            "commit",
+            "-m",
+            f"watch: move {destination.name} to done",
+            "--only",
+            "--",
+            str(source),
+            str(destination),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if commit_result.returncode != 0:
+        error = commit_result.stderr.strip() or commit_result.stdout.strip() or "unknown git error"
+        return False, f"Failed to commit watched plan completion: {error}"
+
+    return True, True
 
 
 def load_queue(queue_file: str) -> list[str]:
@@ -522,6 +774,100 @@ def cmd_run(args) -> int:
         return run_with_continuation(state.plan_file, step_mode=state.step_mode)
 
 
+def cmd_watch(args) -> int:
+    """
+    Watch a todo directory and run the next plan through todo -> doing -> done.
+
+    The watched plan is moved from todo/ to doing/, a new branch is created from
+    the branch active when watch started, dvx run is executed synchronously, and
+    on success the plan is moved from doing/ to done/.
+    """
+    ok, branch_or_error = check_watch_git_environment()
+    if not ok:
+        print(f"Error: {branch_or_error}")
+        return 1
+
+    start_branch = branch_or_error
+    todo_dir = Path(args.todo)
+    doing_dir = Path(args.doing)
+    done_dir = Path(args.done)
+
+    ensure_watch_directories(todo_dir, doing_dir, done_dir)
+
+    print(f"Watching for the next file in: {todo_dir}")
+    print(f"Start branch: {start_branch}")
+    print(f"Todo directory: {todo_dir}")
+    print(f"Doing directory: {doing_dir}")
+    print(f"Done directory: {done_dir}")
+    print("Press Ctrl-C to stop.")
+
+    try:
+        todo_file = wait_for_new_todo_file(todo_dir)
+    except KeyboardInterrupt:
+        print()
+        print("Watch cancelled.")
+        return 130
+
+    branch_name = todo_file.stem
+    ok, error = validate_watch_branch_name(branch_name)
+    if not ok:
+        print(f"Error: {error}")
+        return 1
+
+    ok, error = create_watch_branch(start_branch, branch_name)
+    if not ok:
+        print(f"Error: {error}")
+        return 1
+
+    ok, moved_plan = move_watch_plan(todo_file, doing_dir)
+    if not ok:
+        print(f"Error: {moved_plan}")
+        return 1
+
+    run_plan = moved_plan
+
+    print(f"Detected: {todo_file}")
+    print(f"Created branch: {branch_name}")
+    print(f"Moved to doing: {run_plan}")
+    print(f"Running: {' '.join([*resolve_dvx_command(), 'run', str(run_plan)])}")
+
+    run_result, error = run_watch_plan(run_plan)
+    if error:
+        print(f"Error: {error}")
+        return 1
+
+    if run_result != 0:
+        print(f"dvx run exited with status {run_result}. Leaving plan in doing: {run_plan}")
+        return run_result
+
+    ok, error = validate_completed_watch_plan(run_plan)
+    if not ok:
+        print(f"Error: {error}")
+        print(f"Leaving plan in doing: {run_plan}")
+        print(f"Run `dvx run {run_plan}` manually to continue.")
+        return 1
+
+    ok, completed_plan = move_completed_watch_plan(run_plan, done_dir)
+    if not ok:
+        print(f"Error: {completed_plan}")
+        return 1
+
+    destination = completed_plan
+    print(f"Moved completed plan to: {destination}")
+
+    ok, committed = commit_watch_completion(todo_file, destination)
+    if not ok:
+        print(f"Error: {committed}")
+        return 1
+
+    if committed:
+        print(f"Committed watch completion move for: {destination}")
+    else:
+        print(f"No git commit created for completed plan move: {destination}")
+
+    return 0
+
+
 def cmd_status(args) -> int:
     """Show current orchestration status for a plan."""
     plan_file = args.plan_file
@@ -636,6 +982,13 @@ def main() -> int:
     run_parser.add_argument("-f", "--force", action="store_true", help="Force restart with new plan file")
     run_parser.add_argument("-s", "--step", action="store_true", help="Step mode: pause after each task for review")
     run_parser.set_defaults(func=cmd_run)
+
+    # watch
+    watch_parser = subparsers.add_parser("watch", help="Watch a todo directory and run the next plan once")
+    watch_parser.add_argument("--todo", default="./todo/", help="Directory to watch for new plan files")
+    watch_parser.add_argument("--doing", default="./doing/", help="Directory where plans move while dvx run is active")
+    watch_parser.add_argument("--done", default="./done/", help="Directory where completed plans move after success")
+    watch_parser.set_defaults(func=cmd_watch)
 
     # status
     status_parser = subparsers.add_parser("status", help="Show current status for a plan")
