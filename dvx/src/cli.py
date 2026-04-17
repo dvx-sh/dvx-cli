@@ -20,6 +20,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).parent))
 
 from claude_session import launch_interactive
+from context import load_latest_content, slug_from_plan_file
 from orchestrator import load_skill, run_orchestrator, run_skill
 from plan_parser import (
     clear_status_for_plan,
@@ -126,6 +127,17 @@ def cmd_plan(args) -> int:
     else:
         action = "create"
 
+    snapshot_content = ""
+    snapshot_path = getattr(args, "snapshot", None)
+    if snapshot_path:
+        snapshot_file = Path(snapshot_path)
+        if not snapshot_file.exists():
+            print(f"Error: Snapshot file not found: {snapshot_path}")
+            return 1
+        snapshot_content = snapshot_file.read_text()
+    elif plan_file:
+        snapshot_content = load_latest_content(slug_from_plan_file(plan_file)) or ""
+
     # Use skills instead of inline prompts
     if action == "update":
         result = run_skill("update-plan", {
@@ -137,6 +149,8 @@ def cmd_plan(args) -> int:
         result = run_skill("create-plan", {
             "requirements": user_input,
             "output_file": plan_file or "",
+            "snapshot_content": snapshot_content,
+            "interview_spec": "",
         }, model="opus")
 
     if not result.success:
@@ -1008,6 +1022,10 @@ def main() -> int:
     # plan
     plan_parser = subparsers.add_parser("plan", help="Generate or update a plan file with Claude")
     plan_parser.add_argument("plan_file", nargs="?", help="Path to PLAN-*.md file (optional)")
+    plan_parser.add_argument(
+        "--snapshot",
+        help="Path to a .dvx/context/ snapshot to use as grounding context",
+    )
     plan_parser.set_defaults(func=cmd_plan)
 
     args = parser.parse_args()

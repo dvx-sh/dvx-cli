@@ -30,7 +30,7 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-py-modules = ["cli", "orchestrator", "claude_session", "plan_parser", "state"]
+py-modules = ["cli", "orchestrator", "claude_session", "plan_parser", "state", "context"]
 package-dir = {"" = "src"}
 
 [tool.setuptools.package-data]
