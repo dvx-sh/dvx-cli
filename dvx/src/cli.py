@@ -20,6 +20,13 @@ import yaml
 sys.path.insert(0, str(Path(__file__).parent))
 
 from claude_session import launch_interactive
+from consensus import (
+    MAX_ITERATIONS,
+    make_skill_caller,
+    render_no_consensus_summary,
+    run_consensus,
+    validate_plan,
+)
 from context import load_latest_content, slug_from, slug_from_plan_file
 from interview import (
     PROFILE_THRESHOLDS,
@@ -165,6 +172,41 @@ def cmd_plan(args) -> int:
             interview_spec_content = spec_body
             print(f"Using interview spec: {interview_spec_path(slug_for_plan)}")
 
+    # --consensus: run Planner → Architect → Critic loop and write the result.
+    if getattr(args, "consensus", False):
+        if action == "update":
+            print("Error: --consensus is for new plans; use `dvx plan` without --consensus to update.")
+            return 1
+
+        print(f"Running consensus planning (up to {MAX_ITERATIONS} iterations)...")
+        print()
+
+        skill_caller = make_skill_caller(run_skill, model="opus")
+        try:
+            result = run_consensus(
+                task=user_input,
+                call_skill=skill_caller,
+                snapshot_content=snapshot_content,
+                interview_spec=interview_spec_content,
+            )
+        except RuntimeError as exc:
+            print(f"Error: consensus loop failed - {exc}")
+            return 1
+
+        if not plan_file:
+            plan_file = _derive_plan_filename_from_task(user_input)
+
+        missing = validate_plan(result.final_plan)
+        if missing:
+            print(f"Warning: final plan is missing required sections: {missing}")
+
+        Path(plan_file).write_text(result.final_plan.rstrip() + "\n")
+        verdict = "APPROVED" if result.approved else "NO-CONSENSUS"
+        print(f"{verdict}: wrote {plan_file} after {len(result.iterations)} iteration(s)")
+        if not result.approved:
+            print(render_no_consensus_summary(result))
+        return 0
+
     # Use skills instead of inline prompts
     if action == "update":
         result = run_skill("update-plan", {
@@ -208,6 +250,11 @@ def cmd_plan(args) -> int:
     print(f"  {line_count} lines")
 
     return 0
+
+
+def _derive_plan_filename_from_task(task: str) -> str:
+    """Return a `PLAN-<slug>.md` filename derived from a task description."""
+    return f"PLAN-{slug_from(task)}.md"
 
 
 def cmd_interview(args) -> int:
@@ -1170,6 +1217,11 @@ def main() -> int:
     plan_parser.add_argument(
         "--snapshot",
         help="Path to a .dvx/context/ snapshot to use as grounding context",
+    )
+    plan_parser.add_argument(
+        "--consensus",
+        action="store_true",
+        help="Run Planner/Architect/Critic consensus loop (up to 5 iterations)",
     )
     plan_parser.set_defaults(func=cmd_plan)
 
