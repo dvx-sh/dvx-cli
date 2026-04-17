@@ -20,7 +20,26 @@ import yaml
 sys.path.insert(0, str(Path(__file__).parent))
 
 from claude_session import launch_interactive
-from context import load_latest_content, slug_from_plan_file
+from context import load_latest_content, slug_from, slug_from_plan_file
+from interview import (
+    PROFILE_THRESHOLDS,
+    get_profile,
+    load_spec,
+    render_transcript,
+    validate_spec,
+)
+from interview import (
+    load_state as load_interview_state,
+)
+from interview import (
+    new_state as new_interview_state,
+)
+from interview import (
+    save_state as save_interview_state,
+)
+from interview import (
+    spec_path as interview_spec_path,
+)
 from orchestrator import load_skill, run_orchestrator, run_skill
 from plan_parser import (
     clear_status_for_plan,
@@ -135,8 +154,16 @@ def cmd_plan(args) -> int:
             print(f"Error: Snapshot file not found: {snapshot_path}")
             return 1
         snapshot_content = snapshot_file.read_text()
-    elif plan_file:
-        snapshot_content = load_latest_content(slug_from_plan_file(plan_file)) or ""
+
+    interview_spec_content = ""
+    if plan_file:
+        slug_for_plan = slug_from_plan_file(plan_file)
+        if not snapshot_content:
+            snapshot_content = load_latest_content(slug_for_plan) or ""
+        spec_body = load_spec(slug_for_plan)
+        if spec_body:
+            interview_spec_content = spec_body
+            print(f"Using interview spec: {interview_spec_path(slug_for_plan)}")
 
     # Use skills instead of inline prompts
     if action == "update":
@@ -150,7 +177,7 @@ def cmd_plan(args) -> int:
             "requirements": user_input,
             "output_file": plan_file or "",
             "snapshot_content": snapshot_content,
-            "interview_spec": "",
+            "interview_spec": interview_spec_content,
         }, model="opus")
 
     if not result.success:
@@ -180,6 +207,90 @@ def cmd_plan(args) -> int:
     line_count = len(output.split("\n"))
     print(f"  {line_count} lines")
 
+    return 0
+
+
+def cmd_interview(args) -> int:
+    """
+    Launch an interactive deep-interview session for a task.
+
+    Claude runs the Socratic loop in-session; Python seeds the skill
+    prompt, persists resumable state, and checks for the resulting
+    `.dvx/specs/interview-<slug>.md` after the session exits.
+    """
+    task: str = args.task.strip()
+    if not task:
+        print("Error: task description is required.")
+        return 1
+
+    profile = args.profile
+    if profile not in PROFILE_THRESHOLDS:
+        print(f"Error: unknown profile '{profile}'. Valid: {sorted(PROFILE_THRESHOLDS)}")
+        return 1
+
+    slug = args.slug or slug_from(task)
+    project_dir: Optional[str] = None
+
+    state = load_interview_state(slug, project_dir)
+    if state is None:
+        threshold, max_rounds = get_profile(profile)
+        brownfield = Path(".git").exists()
+        state = new_interview_state(
+            task=task,
+            profile=profile,
+            brownfield=brownfield,
+            slug=slug,
+        )
+        save_interview_state(state, project_dir)
+        print(f"Starting deep-interview ({profile}, threshold {threshold:.2f}, max {max_rounds} rounds)")
+    else:
+        print(f"Resuming interview for slug '{slug}' at round {len(state.rounds) + 1}")
+    print(f"Task: {task}")
+
+    snapshot_content = load_latest_content(slug, project_dir) or ""
+    prior_transcript = render_transcript(state) if state.rounds else ""
+
+    skill_content = load_skill("interview")
+    prompt = (
+        skill_content.replace("$ARGUMENTS.task", task)
+        .replace("$ARGUMENTS.slug", slug)
+        .replace("$ARGUMENTS.profile", profile)
+        .replace("$ARGUMENTS.threshold", f"{state.threshold:.2f}")
+        .replace("$ARGUMENTS.max_rounds", str(state.max_rounds))
+        .replace("$ARGUMENTS.snapshot_content", snapshot_content)
+        .replace("$ARGUMENTS.prior_transcript", prior_transcript)
+    )
+
+    spec_path_hint = interview_spec_path(slug, project_dir)
+    prompt += (
+        "\n\n## Output path\n\n"
+        f"When the interview converges, write the finalized spec to "
+        f"`{spec_path_hint}` yourself (create the directory if missing). "
+        "Include the Metadata, Intent, Desired outcome, In-scope, "
+        "Out-of-scope / Non-goals, Decision boundaries, Constraints, "
+        "Acceptance criteria, Assumptions, and Transcript sections. "
+        "Only output `[INTERVIEW_COMPLETE]` once the file is on disk.\n"
+    )
+
+    print()
+    print("Launching interactive Claude session for the interview.")
+    print("Type `/exit` when the spec has been written to return to dvx.")
+    launch_interactive(initial_prompt=prompt, plan_file=None, auto_explain=False)
+
+    print()
+    body = load_spec(slug, project_dir)
+    if body is None:
+        print(f"No spec was written. Run `dvx interview --slug {slug}` again to resume.")
+        return 1
+
+    missing = validate_spec(body)
+    if missing:
+        print(f"Warning: spec is missing required sections: {missing}")
+        print(f"Edit {interview_spec_path(slug, project_dir)} to add them.")
+
+    state.finished = True
+    save_interview_state(state, project_dir)
+    print(f"Interview complete. Spec at: {interview_spec_path(slug, project_dir)}")
     return 0
 
 
@@ -1018,6 +1129,40 @@ def main() -> int:
     clean_parser = subparsers.add_parser("clean", help="Delete .dvx/ directory (all) or plan-specific state")
     clean_parser.add_argument("plan_file", nargs="?", help="Path to PLAN-*.md file (optional, cleans all if omitted)")
     clean_parser.set_defaults(func=cmd_clean)
+
+    # interview
+    interview_parser = subparsers.add_parser(
+        "interview",
+        help="Run a deep-interview session that produces an execution-ready spec",
+    )
+    interview_parser.add_argument("task", help="The task to clarify through interview")
+    interview_profile = interview_parser.add_mutually_exclusive_group()
+    interview_profile.add_argument(
+        "--quick",
+        dest="profile",
+        action="store_const",
+        const="quick",
+        help="Quick profile (threshold 0.30, max 5 rounds)",
+    )
+    interview_profile.add_argument(
+        "--standard",
+        dest="profile",
+        action="store_const",
+        const="standard",
+        help="Standard profile (threshold 0.20, max 12 rounds) — default",
+    )
+    interview_profile.add_argument(
+        "--deep",
+        dest="profile",
+        action="store_const",
+        const="deep",
+        help="Deep profile (threshold 0.15, max 20 rounds)",
+    )
+    interview_parser.add_argument(
+        "--slug",
+        help="Override the auto-derived slug for state and spec filenames",
+    )
+    interview_parser.set_defaults(func=cmd_interview, profile="standard")
 
     # plan
     plan_parser = subparsers.add_parser("plan", help="Generate or update a plan file with Claude")
