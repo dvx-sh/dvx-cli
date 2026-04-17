@@ -19,6 +19,16 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+from autopilot import (
+    AutopilotPlan,
+    build_plan_from_args,
+    plan_artifact_exists,
+    run_pipeline,
+    write_autopilot_summary,
+)
+from autopilot import (
+    summarize as summarize_autopilot,
+)
 from claude_session import launch_interactive
 from consensus import (
     MAX_ITERATIONS,
@@ -255,6 +265,106 @@ def cmd_plan(args) -> int:
 def _derive_plan_filename_from_task(task: str) -> str:
     """Return a `PLAN-<slug>.md` filename derived from a task description."""
     return f"PLAN-{slug_from(task)}.md"
+
+
+def _autopilot_interview_phase(plan: AutopilotPlan, project_dir: Optional[str]) -> int:
+    if plan.skip_interview:
+        print("[autopilot] skipping interview phase (--skip-interview)")
+        return 0
+    from types import SimpleNamespace
+
+    interview_args = SimpleNamespace(
+        task=plan.task,
+        profile="standard",
+        slug=plan.slug,
+    )
+    print("[autopilot] phase: interview")
+    return cmd_interview(interview_args)
+
+
+def _autopilot_planning_phase(plan: AutopilotPlan, project_dir: Optional[str]) -> int:
+    from types import SimpleNamespace
+
+    if plan_artifact_exists(plan.slug, project_dir):
+        print(f"[autopilot] plan file already exists: {plan.plan_file} (skipping planning)")
+        return 0
+
+    plan_args = SimpleNamespace(
+        plan_file=plan.plan_file,
+        snapshot=None,
+        consensus=not plan.skip_consensus,
+    )
+
+    # cmd_plan reads from stdin for requirements when there is no interview
+    # spec — feed it the task via an in-memory replacement so autopilot can
+    # stay non-interactive after the interview phase.
+    original_stdin = sys.stdin
+    import io
+
+    sys.stdin = io.StringIO(plan.task + "\n")
+    try:
+        print("[autopilot] phase: planning")
+        return cmd_plan(plan_args)
+    finally:
+        sys.stdin = original_stdin
+
+
+def _autopilot_running_phase(plan: AutopilotPlan, project_dir: Optional[str]) -> int:
+    from types import SimpleNamespace
+
+    run_args = SimpleNamespace(
+        plan_file=plan.plan_file,
+        force=False,
+        step=False,
+        no_deslop=plan.no_deslop,
+    )
+    print("[autopilot] phase: running")
+    return cmd_run(run_args)
+
+
+def cmd_autopilot(args) -> int:
+    """
+    Sequence: interview → consensus plan → run (with finalize + deslop).
+
+    Each phase writes its own artifact so a failure in any one phase is
+    resumable via `dvx autopilot --resume <slug>` (or the phase-level
+    subcommand directly).
+    """
+    task: str = (args.task or "").strip()
+    resume_slug: Optional[str] = getattr(args, "resume", None)
+
+    if not task and not resume_slug:
+        print("Error: provide a task string or --resume <slug>.")
+        return 1
+
+    plan = build_plan_from_args(
+        task=task,
+        skip_interview=getattr(args, "skip_interview", False),
+        skip_consensus=getattr(args, "skip_consensus", False),
+        no_deslop=getattr(args, "no_deslop", False),
+        explicit_plan_file=getattr(args, "plan_file", None),
+        resume_slug=resume_slug,
+    )
+
+    print(f"[autopilot] task: {plan.task}")
+    print(f"[autopilot] slug: {plan.slug}")
+    print(f"[autopilot] plan file target: {plan.plan_file}")
+
+    rc = run_pipeline(
+        plan,
+        interview_fn=_autopilot_interview_phase,
+        planning_fn=_autopilot_planning_phase,
+        running_fn=_autopilot_running_phase,
+    )
+
+    summary = summarize_autopilot(plan, rc)
+    print()
+    print("=" * 60)
+    print("AUTOPILOT SUMMARY")
+    print("=" * 60)
+    print(summary)
+    write_autopilot_summary(plan, summary)
+    return rc
 
 
 def cmd_interview(args) -> int:
@@ -1180,6 +1290,43 @@ def main() -> int:
     clean_parser = subparsers.add_parser("clean", help="Delete .dvx/ directory (all) or plan-specific state")
     clean_parser.add_argument("plan_file", nargs="?", help="Path to PLAN-*.md file (optional, cleans all if omitted)")
     clean_parser.set_defaults(func=cmd_clean)
+
+    # autopilot
+    autopilot_parser = subparsers.add_parser(
+        "autopilot",
+        help="Sequence interview → consensus plan → run end-to-end",
+    )
+    autopilot_parser.add_argument(
+        "task",
+        nargs="?",
+        default="",
+        help="Task description to plan and build (omit with --resume)",
+    )
+    autopilot_parser.add_argument(
+        "--skip-interview",
+        action="store_true",
+        help="Skip the interview phase; use the task string as requirements directly",
+    )
+    autopilot_parser.add_argument(
+        "--skip-consensus",
+        action="store_true",
+        help="Skip the consensus loop; produce a single-perspective plan",
+    )
+    autopilot_parser.add_argument(
+        "--no-deslop",
+        action="store_true",
+        help="Skip the post-approval deslop cleanup pass",
+    )
+    autopilot_parser.add_argument(
+        "--plan-file",
+        dest="plan_file",
+        help="Use an existing plan file and start from the run phase",
+    )
+    autopilot_parser.add_argument(
+        "--resume",
+        help="Resume an in-progress autopilot run by slug",
+    )
+    autopilot_parser.set_defaults(func=cmd_autopilot)
 
     # interview
     interview_parser = subparsers.add_parser(
