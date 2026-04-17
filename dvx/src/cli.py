@@ -1056,6 +1056,8 @@ def cmd_status(args) -> int:
     print(f"Current task: {state.current_task_id or 'none'} - {state.current_task_title or ''}")
     print(f"Iteration: {state.iteration_count}/{state.max_iterations}")
     print(f"Step mode: {'yes' if state.step_mode else 'no'}")
+    if state.finalize_verdict is not None:
+        print(f"Finalize verdict: {state.finalize_verdict} (after {state.finalize_iterations} finalize iteration(s))")
     print(f"Started: {state.started_at}")
     print(f"Updated: {state.updated_at}")
     print()

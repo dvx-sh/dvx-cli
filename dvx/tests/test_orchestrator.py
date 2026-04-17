@@ -322,11 +322,11 @@ Found some problems.
         assert result["has_issues"] is True
         assert len(result["issues"]) == 2
 
-    def test_issues_override_approved(self):
-        """If both markers present, issues takes precedence."""
+    def test_first_line_wins_approved(self):
+        """Under the first-line-only contract, the first tag wins."""
         result = parse_finalizer_result("[APPROVED]\n[ISSUES]\n### Issue 1: Problem")
-        assert result["approved"] is False
-        assert result["has_issues"] is True
+        assert result["approved"] is True
+        assert result["has_issues"] is False
 
     def test_no_markers(self):
         """No markers should default to not approved, no issues."""
@@ -393,11 +393,11 @@ Fix these before merge.
         assert result["approved"] is False
         assert result["has_suggestions"] is True
 
-    def test_issues_override_suggestions(self):
-        """If both [ISSUES] and [SUGGESTIONS] present, issues takes precedence."""
+    def test_first_line_wins_suggestions(self):
+        """Under the first-line-only contract, the first tag wins."""
         result = parse_finalizer_result("[SUGGESTIONS]\n[ISSUES]\n### Issue 1: Bug")
-        assert result["has_issues"] is True
-        assert result["has_suggestions"] is False
+        assert result["has_suggestions"] is True
+        assert result["has_issues"] is False
 
     def test_suggestions_case_insensitive(self):
         """[suggestions] marker should be case insensitive."""

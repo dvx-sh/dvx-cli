@@ -125,6 +125,12 @@ git diff $ARGUMENTS.base_branch...HEAD
 
 ## Output Format
 
+**Verdict tag placement**: the verdict tag (`[APPROVED]`, `[SUGGESTIONS]`,
+`[ISSUES]`, or `[CRITICAL]`) MUST be the **first non-empty line** of your
+response. The orchestrator parses the first line to decide next steps —
+anything else is treated as a parse error and the run is blocked for human
+review.
+
 After your thorough analysis, output ONE of these signals:
 
 ### If everything looks good:
@@ -199,6 +205,7 @@ The orchestrator will run additional implement-review cycles to address these is
 - **[APPROVED]** — clean, ready for merge as-is
 - **[SUGGESTIONS]** — optional improvements to apply before merge (quick wins and deferred FIX files). Use when the code works correctly but could be improved.
 - **[ISSUES]** — bugs, test failures, or problems that block merge. Use when something is actually broken or wrong.
+- **[CRITICAL]** — unrecoverable issue (broken build, destroyed data, security vulnerability shipped). Emit only when the finalize loop cannot recover without human intervention.
 
 Be conservative: when in doubt between [SUGGESTIONS] and [ISSUES], prefer [SUGGESTIONS]. Quick wins should be low-risk, obvious improvements. Deferred work goes to FIX files.
 

@@ -782,41 +782,69 @@ def run_finalizer(plan_file: str) -> SessionResult:
     )
 
 
+FINALIZE_VERDICTS = ("APPROVED", "SUGGESTIONS", "ISSUES", "CRITICAL")
+
+
 def parse_finalizer_result(output: str) -> dict:
     """
     Parse the finalizer's output to determine next action.
 
+    The verdict tag MUST be the first non-empty line of the output.
+    Anything else is a parse error and the orchestrator treats it as a
+    block.
+
     Returns dict with:
+        - verdict: str | None - The parsed tag, uppercased; None on parse error
         - approved: bool - True if [APPROVED]
         - has_issues: bool - True if [ISSUES] found
         - has_suggestions: bool - True if [SUGGESTIONS] found
+        - has_critical: bool - True if [CRITICAL] found
+        - parse_error: bool - True if the first line is not a known verdict
         - issues: list[str] - List of issues if not approved
         - suggestions: str - Full suggestions text for implementer
         - output: str - Full output
     """
-    output_lower = output.lower()
+    verdict = _extract_first_line_verdict(output)
+    parse_error = verdict is None
 
-    approved = "[approved]" in output_lower
-    has_issues = "[issues]" in output_lower
-    has_suggestions = "[suggestions]" in output_lower
+    has_issues = verdict == "ISSUES"
+    has_suggestions = verdict == "SUGGESTIONS"
+    has_critical = verdict == "CRITICAL"
+    approved = verdict == "APPROVED"
 
-    # Extract issues if present
-    issues = []
+    issues: list[str] = []
     if has_issues:
         import re
-        # Look for "### Issue N:" patterns
         issue_pattern = r'###\s*Issue\s*\d+[:\s]+(.+?)(?=###\s*Issue|\Z|##\s*Action)'
         matches = re.findall(issue_pattern, output, re.DOTALL | re.IGNORECASE)
         issues = [m.strip() for m in matches if m.strip()]
 
     return {
-        "approved": approved and not has_issues and not has_suggestions,
+        "verdict": verdict,
+        "approved": approved,
         "has_issues": has_issues,
-        "has_suggestions": has_suggestions and not has_issues,
+        "has_suggestions": has_suggestions,
+        "has_critical": has_critical,
+        "parse_error": parse_error,
         "issues": issues,
-        "suggestions": output if has_suggestions and not has_issues else "",
+        "suggestions": output if has_suggestions else "",
         "output": output,
     }
+
+
+def _extract_first_line_verdict(output: str) -> Optional[str]:
+    """Return the uppercased verdict tag on the first non-empty line, or None."""
+    if not output:
+        return None
+    for line in output.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        for tag in FINALIZE_VERDICTS:
+            if stripped.upper().startswith(f"[{tag}]"):
+                return tag
+        return None
+    return None
 
 
 def run_finalizer_fix(issues: str, plan_file: str) -> SessionResult:
@@ -851,6 +879,17 @@ Focus on addressing the specific issues listed above. Do not make unrelated chan
 """
 
     return run_claude(prompt)
+
+
+def _record_finalize_verdict(plan_file: str, verdict: str, iteration: int) -> None:
+    """Persist the finalize verdict to state."""
+    state = load_state(plan_file)
+    if state is None:
+        logger.warning(f"Cannot record finalize verdict; no state for {plan_file}")
+        return
+    state.finalize_verdict = verdict
+    state.finalize_iterations = iteration
+    save_state(state)
 
 
 def cleanup_plan(plan_file: str) -> bool:
@@ -1110,7 +1149,7 @@ def _run_finalization(plan_file: str, state: State) -> int:
     # === FINALIZE: Single review loop ===
     print("Running final review...")
 
-    max_finalizer_iterations = 5
+    max_finalizer_iterations = 3
     iteration = 0
 
     while iteration < max_finalizer_iterations:
@@ -1133,12 +1172,36 @@ def _run_finalization(plan_file: str, state: State) -> int:
             if not should_continue:
                 return exit_code
             # Escalater decided to proceed - treat as approved
+            _record_finalize_verdict(plan_file, "APPROVED", iteration)
             break
 
         result = parse_finalizer_result(finalizer_result.output)
 
+        if result["parse_error"]:
+            msg = (
+                "Finalizer output did not start with a recognized verdict tag "
+                "([APPROVED] / [SUGGESTIONS] / [ISSUES] / [CRITICAL])."
+            )
+            _record_finalize_verdict(plan_file, "BLOCKED", iteration)
+            return handle_blocked(
+                state,
+                msg,
+                f"{msg}\n\n---\n\nFull finalizer output:\n\n{finalizer_result.output}",
+                session_id=finalizer_result.session_id,
+            )
+
+        if result["has_critical"]:
+            _record_finalize_verdict(plan_file, "CRITICAL", iteration)
+            return handle_blocked(
+                state,
+                "Finalizer flagged a CRITICAL issue that cannot auto-resolve.",
+                finalizer_result.output,
+                session_id=finalizer_result.session_id,
+            )
+
         if result["approved"]:
             print("  Finalizer approved all changes!")
+            _record_finalize_verdict(plan_file, "APPROVED", iteration)
             break
 
         if result["has_suggestions"]:
@@ -1218,18 +1281,16 @@ def _run_finalization(plan_file: str, state: State) -> int:
         break
 
     else:
-        # Exceeded max iterations
+        # Exceeded max iterations — treat as terminal block; do not mark
+        # the plan as complete just because the orchestrator ran out of
+        # tries. The user decides whether to accept the current state.
         print(f"  Max finalizer iterations ({max_finalizer_iterations}) reached")
-        should_continue, exit_code = evaluate_trigger(
+        _record_finalize_verdict(plan_file, "BLOCKED", max_finalizer_iterations)
+        return handle_blocked(
             state,
-            Task(id="finalizer", title="Final review", description="", status=TaskStatus.DONE),
-            "orchestrator",
-            f"Finalizer fix loop exceeded {max_finalizer_iterations} iterations",
+            f"Finalizer fix loop exceeded {max_finalizer_iterations} iterations without APPROVED",
             "The finalizer and implementer could not converge on an approved state.",
         )
-        if not should_continue:
-            return exit_code
-        # Escalater decided to proceed anyway
 
     # === FINALIZE ===
     print()
