@@ -881,6 +881,73 @@ Focus on addressing the specific issues listed above. Do not make unrelated chan
     return run_claude(prompt)
 
 
+CHANGED_FILES_MANIFEST = "changed-files.txt"
+DESLOP_LOG = "deslop-log.md"
+
+
+def compute_changed_files(base_ref: str = "HEAD") -> list[str]:
+    """
+    Return files modified since `base_ref` in the current working tree.
+
+    Combines `git diff --name-only HEAD` with untracked files from
+    `git status --porcelain` so the manifest reflects both committed and
+    uncommitted work since the session started.
+    """
+    changed: set[str] = set()
+    try:
+        diff = subprocess.run(
+            ["git", "diff", "--name-only", base_ref],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if diff.returncode == 0:
+            for line in diff.stdout.splitlines():
+                line = line.strip()
+                if line:
+                    changed.add(line)
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if status.returncode == 0:
+            for line in status.stdout.splitlines():
+                if len(line) < 4:
+                    continue
+                # Porcelain format: "XY path" (with optional rename marker).
+                path = line[3:].strip()
+                if " -> " in path:
+                    path = path.split(" -> ", 1)[1]
+                if path:
+                    changed.add(path)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"Failed to compute changed files: {exc}")
+    return sorted(changed)
+
+
+def write_changed_files_manifest(plan_file: str, files: list[str]) -> Path:
+    """Persist the session's changed-files list to `.dvx/<plan>/changed-files.txt`."""
+    dvx_dir = ensure_dvx_dir(plan_file)
+    path = dvx_dir / CHANGED_FILES_MANIFEST
+    path.write_text("\n".join(files) + ("\n" if files else ""))
+    return path
+
+
+def load_changed_files_manifest(plan_file: str) -> list[str]:
+    """Load a previously-written changed-files manifest, or [] if missing."""
+    path = get_dvx_dir(plan_file) / CHANGED_FILES_MANIFEST
+    if not path.exists():
+        return []
+    return [line for line in path.read_text().splitlines() if line.strip()]
+
+
+def is_deslop_noop(output: str) -> bool:
+    """Return True if the deslop skill reported a no-op."""
+    return "[DESLOP_NOOP]" in (output or "").upper()
+
+
 def _record_finalize_verdict(plan_file: str, verdict: str, iteration: int) -> None:
     """Persist the finalize verdict to state."""
     state = load_state(plan_file)
@@ -890,6 +957,165 @@ def _record_finalize_verdict(plan_file: str, verdict: str, iteration: int) -> No
     state.finalize_verdict = verdict
     state.finalize_iterations = iteration
     save_state(state)
+
+
+def run_deslop(changed_files: list[str], plan_file: str) -> SessionResult:
+    """Run the deslop skill on the session's changed files."""
+    logger.info(f"Running deslop on {len(changed_files)} file(s)")
+    return run_skill(
+        "deslop",
+        {
+            "changed_files": "\n".join(changed_files),
+            "plan_file": plan_file,
+        },
+        model="opus",
+    )
+
+
+def _run_deslop_pass(plan_file: str, state: State) -> None:
+    """
+    Run the deslop cleanup after the finalizer has approved the run.
+
+    - Scope is strictly the session's changed files.
+    - If post-deslop regression tests fail, the last cleanup commit is
+      reverted and the failure is logged; the run still proceeds to
+      completion because the pre-deslop state was already APPROVED.
+    """
+    print()
+    print("Running deslop pass on session-changed files...")
+
+    changed = load_changed_files_manifest(plan_file)
+    if not changed:
+        changed = compute_changed_files(base_ref="HEAD")
+        if changed:
+            write_changed_files_manifest(plan_file, changed)
+
+    if not changed:
+        print("  No changed files to deslop.")
+        state.deslop_run = True
+        save_state(state)
+        return
+
+    before_head = _current_head_sha()
+    result = run_deslop(changed, plan_file)
+
+    if not result.success:
+        logger.warning(f"Deslop skill failed: {result.block_reason or 'unknown error'}")
+        print("  Deslop skill failed; leaving files untouched.")
+        state.deslop_run = True
+        save_state(state)
+        return
+
+    if is_deslop_noop(result.output):
+        print("  Deslop reported no-op — nothing worth cleaning.")
+        state.deslop_run = True
+        save_state(state)
+        return
+
+    after_head = _current_head_sha()
+    if before_head == after_head:
+        logger.info("Deslop skill ran but produced no new commits")
+
+    # Regression check: run project tests if we can detect how.
+    tests_ok, tests_report = _run_regression_tests()
+    if not tests_ok:
+        logger.warning(f"Deslop regression test failed: {tests_report}")
+        print(f"  Regression after deslop: {tests_report}")
+        _revert_last_commit(before_head)
+        _log_deslop_skip(plan_file, changed, tests_report)
+        state.deslop_run = True
+        state.deslop_skipped_files = list(changed)
+        save_state(state)
+        return
+
+    print("  Deslop complete; regression tests pass.")
+    state.deslop_run = True
+    save_state(state)
+
+
+def _current_head_sha() -> str:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return result.stdout.strip()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _run_regression_tests() -> tuple[bool, str]:
+    """
+    Best-effort regression check after deslop.
+
+    Tries `pytest -q`, then `npm test --silent`, then `go test ./...`.
+    If none are applicable, returns (True, "no test command detected").
+    """
+    commands: list[list[str]] = []
+    if Path("pyproject.toml").exists() or Path("pytest.ini").exists() or Path("tests").is_dir():
+        commands.append(["pytest", "-q"])
+    if Path("package.json").exists():
+        commands.append(["npm", "test", "--silent"])
+    if Path("go.mod").exists():
+        commands.append(["go", "test", "./..."])
+
+    if not commands:
+        return True, "no test command detected"
+
+    for cmd in commands:
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=900,
+            )
+            if result.returncode != 0:
+                return False, f"{' '.join(cmd)} exited {result.returncode}"
+        except FileNotFoundError:
+            continue
+        except Exception as exc:  # noqa: BLE001
+            return False, f"{' '.join(cmd)} raised: {exc}"
+
+    return True, "tests passed"
+
+
+def _revert_last_commit(before_sha: str) -> None:
+    """Reset the last commit(s) back to `before_sha` — soft reset, keep files."""
+    if not before_sha:
+        return
+    try:
+        subprocess.run(
+            ["git", "reset", "--hard", before_sha],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"Failed to revert deslop commit: {exc}")
+
+
+def _log_deslop_skip(plan_file: str, files: list[str], reason: str) -> None:
+    dvx_dir = ensure_dvx_dir(plan_file)
+    log_path = dvx_dir / DESLOP_LOG
+    entry = (
+        f"## {datetime_now_iso()}\n\n"
+        f"Skipped deslop on {len(files)} file(s) — {reason}.\n\n"
+        "Files:\n"
+        + "\n".join(f"- `{f}`" for f in files)
+        + "\n\n---\n"
+    )
+    if log_path.exists():
+        log_path.write_text(log_path.read_text() + entry)
+    else:
+        log_path.write_text(f"# Deslop log: {plan_file}\n\n{entry}")
+
+
+def datetime_now_iso() -> str:
+    from datetime import datetime
+    return datetime.now().isoformat(timespec="seconds")
 
 
 def cleanup_plan(plan_file: str) -> bool:
@@ -1090,18 +1316,19 @@ def handle_blocked(state: State, reason: str, context: str, session_id: Optional
     return 1  # Exit with error to signal blocked state
 
 
-def run_orchestrator(plan_file: str, step_mode: bool = False) -> int:
+def run_orchestrator(plan_file: str, step_mode: bool = False, no_deslop: bool = False) -> int:
     """
     Main orchestration loop.
 
     Args:
         plan_file: Path to the plan file
         step_mode: If True, pause after each task completion for review
+        no_deslop: If True, skip the post-approval deslop cleanup pass
 
     Returns: 0 on success/completion, 1 on error/blocked/paused
     """
     try:
-        return _run_orchestrator_inner(plan_file, step_mode)
+        return _run_orchestrator_inner(plan_file, step_mode, no_deslop=no_deslop)
     except KeyboardInterrupt:
         logger.info("Interrupted by user")
         print(f"\nInterrupted. Run 'dvx run {plan_file}' to resume.")
@@ -1117,7 +1344,7 @@ def run_orchestrator(plan_file: str, step_mode: bool = False) -> int:
         return 1
 
 
-def _run_finalization(plan_file: str, state: State) -> int:
+def _run_finalization(plan_file: str, state: State, no_deslop: bool = False) -> int:
     """
     Run the finalization process after all tasks are complete.
 
@@ -1292,6 +1519,12 @@ def _run_finalization(plan_file: str, state: State) -> int:
             "The finalizer and implementer could not converge on an approved state.",
         )
 
+    # === DESLOP PASS (post-APPROVED only) ===
+    if no_deslop:
+        logger.info("Skipping deslop pass (--no-deslop)")
+    else:
+        _run_deslop_pass(plan_file, state)
+
     # === FINALIZE ===
     print()
     print("  Finalizing plan...")
@@ -1319,7 +1552,7 @@ def _run_finalization(plan_file: str, state: State) -> int:
         return 0
 
 
-def _run_orchestrator_inner(plan_file: str, step_mode: bool = False) -> int:
+def _run_orchestrator_inner(plan_file: str, step_mode: bool = False, no_deslop: bool = False) -> int:
     """Inner orchestration loop (wrapped by run_orchestrator for error handling)."""
     # Ensure .dvx directory exists for this plan
     ensure_dvx_dir(plan_file)
@@ -1335,6 +1568,12 @@ def _run_orchestrator_inner(plan_file: str, step_mode: bool = False) -> int:
         state.step_mode = step_mode
         save_state(state)
 
+    # Freeze the pre-run HEAD SHA so deslop can scope its manifest to
+    # files changed during this session, not the whole branch history.
+    if not (get_dvx_dir(plan_file) / CHANGED_FILES_MANIFEST).exists():
+        changed = compute_changed_files("HEAD")
+        write_changed_files_manifest(plan_file, changed)
+
     logger.info(f"Starting orchestration of {plan_file}")
 
     while True:
@@ -1345,7 +1584,7 @@ def _run_orchestrator_inner(plan_file: str, step_mode: bool = False) -> int:
             summary = get_plan_summary(plan_file)
             if summary['pending'] == 0 and summary['in_progress'] == 0:
                 # All tasks complete - run finalizer
-                return _run_finalization(plan_file, state)
+                return _run_finalization(plan_file, state, no_deslop=no_deslop)
             else:
                 logger.warning("No pending tasks but plan not complete - check for blocked tasks")
                 return 1

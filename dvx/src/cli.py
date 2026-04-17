@@ -724,14 +724,14 @@ def find_continuation_queue(plan_file: str) -> Optional[str]:
     return None
 
 
-def run_with_continuation(plan_file: str, step_mode: bool = False) -> int:
+def run_with_continuation(plan_file: str, step_mode: bool = False, no_deslop: bool = False) -> int:
     """
     Run orchestrator and handle continuation queue on success.
 
     If the plan completes successfully and there's a continuation queue,
     re-exec dvx to process the next plan in the queue.
     """
-    result = run_orchestrator(plan_file, step_mode=step_mode)
+    result = run_orchestrator(plan_file, step_mode=step_mode, no_deslop=no_deslop)
 
     if result == 0:
         # Plan completed successfully - check for continuation
@@ -815,6 +815,7 @@ def cmd_run(args) -> int:
     # Check state first - skip sync for blocked/paused/complete states
     state = load_state(plan_file)
     step_mode = args.step
+    no_deslop = bool(getattr(args, "no_deslop", False))
 
     # Handle blocked state - launch interactive session to resolve
     if state is not None and state.phase == Phase.BLOCKED.value:
@@ -865,7 +866,7 @@ def cmd_run(args) -> int:
         if sync_result['synced'] > 0 or sync_result['added'] > 0:
             print(f"  Updated: {sync_result['synced']} synced, {sync_result['added']} added from plan markers")
 
-        return run_with_continuation(state.plan_file, step_mode=state.step_mode)
+        return run_with_continuation(state.plan_file, step_mode=state.step_mode, no_deslop=no_deslop)
 
     # === PLANNER: Sync state with plan file ===
     # This ensures the status tracking file matches the plan's [x] markers.
@@ -902,14 +903,14 @@ def cmd_run(args) -> int:
         print("=" * 60)
         print()
 
-        return run_with_continuation(plan_file, step_mode=step_mode)
+        return run_with_continuation(plan_file, step_mode=step_mode, no_deslop=no_deslop)
 
     elif state.phase == Phase.PAUSED.value:
         print(f"Resuming from step-mode pause: {state.plan_file}")
         print()
 
         update_phase(Phase.IDLE, plan_file)
-        return run_with_continuation(state.plan_file, step_mode=state.step_mode)
+        return run_with_continuation(state.plan_file, step_mode=state.step_mode, no_deslop=no_deslop)
 
     elif state.phase == Phase.COMPLETE.value:
         print(f"Plan already complete: {state.plan_file}")
@@ -943,7 +944,7 @@ def cmd_run(args) -> int:
             print("Step mode enabled")
             print()
 
-        return run_with_continuation(state.plan_file, step_mode=state.step_mode)
+        return run_with_continuation(state.plan_file, step_mode=state.step_mode, no_deslop=no_deslop)
 
 
 def cmd_watch(args) -> int:
@@ -1155,6 +1156,7 @@ def main() -> int:
     run_parser.add_argument("plan_file", help="Path to PLAN-*.md file")
     run_parser.add_argument("-f", "--force", action="store_true", help="Force restart with new plan file")
     run_parser.add_argument("-s", "--step", action="store_true", help="Step mode: pause after each task for review")
+    run_parser.add_argument("--no-deslop", action="store_true", help="Skip the post-approval deslop cleanup pass")
     run_parser.set_defaults(func=cmd_run)
 
     # watch
