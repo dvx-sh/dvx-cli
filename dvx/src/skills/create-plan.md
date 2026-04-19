@@ -9,6 +9,12 @@ arguments:
   - name: output_file
     description: Optional output filename (if omitted, Claude suggests one)
     required: false
+  - name: snapshot_content
+    description: Optional context snapshot markdown to ground the plan
+    required: false
+  - name: interview_spec
+    description: Optional interview spec markdown to treat as authoritative requirements
+    required: false
 ---
 
 # Create Implementation Plan
@@ -18,6 +24,23 @@ Write a detailed implementation plan based on the requirements below.
 ## Requirements
 
 $ARGUMENTS.requirements
+
+## Grounding context (optional)
+
+If the block below is non-empty, treat it as the shared grounding for the plan.
+Prefer its Known facts, Constraints, and Decision boundaries over your own
+assumptions. If it is empty, proceed without it.
+
+$ARGUMENTS.snapshot_content
+
+## Interview spec (optional, authoritative when present)
+
+If the block below is non-empty, it is the authoritative requirements source.
+The plan's Acceptance Criteria must trace back to the spec's Acceptance
+criteria, and the plan must not contradict the spec's Non-goals or Decision
+boundaries without explicit justification.
+
+$ARGUMENTS.interview_spec
 
 ## Standalone Mode
 

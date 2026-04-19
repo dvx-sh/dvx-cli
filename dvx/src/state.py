@@ -8,7 +8,7 @@ Supports multiple concurrent plans in the same project.
 import json
 import logging
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -53,13 +53,22 @@ class State:
     step_mode: bool = False  # If True, pause after each task completion
     started_at: Optional[str] = None
     updated_at: Optional[str] = None
+    finalize_verdict: Optional[str] = None  # APPROVED | SUGGESTIONS | ISSUES | BLOCKED
+    finalize_iterations: int = 0
+    deslop_run: bool = False
+    deslop_skipped_files: list[str] = field(default_factory=list)
+    autopilot_phase: Optional[str] = None  # interview | planning | running | deslop | complete | failed
 
     def to_dict(self) -> dict:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict) -> "State":
-        return cls(**data)
+        # Drop unknown keys from forward-compat state files so older test
+        # fixtures still load without error.
+        known = {f.name for f in fields(cls)}
+        filtered = {k: v for k, v in data.items() if k in known}
+        return cls(**filtered)
 
 
 def get_dvx_root(project_dir: Optional[str] = None) -> Path:

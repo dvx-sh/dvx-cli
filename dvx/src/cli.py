@@ -19,7 +19,44 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from claude_session import launch_interactive
+from autopilot import (
+    AutopilotPlan,
+    build_plan_from_args,
+    plan_artifact_exists,
+    run_pipeline,
+    write_autopilot_summary,
+)
+from autopilot import (
+    summarize as summarize_autopilot,
+)
+from claude_session import launch_interactive, start_session
+from consensus import (
+    MAX_ITERATIONS,
+    make_skill_caller,
+    render_no_consensus_summary,
+    run_consensus,
+    validate_plan,
+)
+from context import load_latest_content, slug_from, slug_from_plan_file
+from interview import (
+    PROFILE_THRESHOLDS,
+    get_profile,
+    load_spec,
+    render_transcript,
+    validate_spec,
+)
+from interview import (
+    load_state as load_interview_state,
+)
+from interview import (
+    new_state as new_interview_state,
+)
+from interview import (
+    save_state as save_interview_state,
+)
+from interview import (
+    spec_path as interview_spec_path,
+)
 from orchestrator import load_skill, run_orchestrator, run_skill
 from plan_parser import (
     clear_status_for_plan,
@@ -126,6 +163,60 @@ def cmd_plan(args) -> int:
     else:
         action = "create"
 
+    snapshot_content = ""
+    snapshot_path = getattr(args, "snapshot", None)
+    if snapshot_path:
+        snapshot_file = Path(snapshot_path)
+        if not snapshot_file.exists():
+            print(f"Error: Snapshot file not found: {snapshot_path}")
+            return 1
+        snapshot_content = snapshot_file.read_text()
+
+    interview_spec_content = ""
+    if plan_file:
+        slug_for_plan = slug_from_plan_file(plan_file)
+        if not snapshot_content:
+            snapshot_content = load_latest_content(slug_for_plan) or ""
+        spec_body = load_spec(slug_for_plan)
+        if spec_body:
+            interview_spec_content = spec_body
+            print(f"Using interview spec: {interview_spec_path(slug_for_plan)}")
+
+    # --consensus: run Planner → Architect → Critic loop and write the result.
+    if getattr(args, "consensus", False):
+        if action == "update":
+            print("Error: --consensus is for new plans; use `dvx plan` without --consensus to update.")
+            return 1
+
+        print(f"Running consensus planning (up to {MAX_ITERATIONS} iterations)...")
+        print()
+
+        skill_caller = make_skill_caller(run_skill, model="opus")
+        try:
+            result = run_consensus(
+                task=user_input,
+                call_skill=skill_caller,
+                snapshot_content=snapshot_content,
+                interview_spec=interview_spec_content,
+            )
+        except RuntimeError as exc:
+            print(f"Error: consensus loop failed - {exc}")
+            return 1
+
+        if not plan_file:
+            plan_file = _derive_plan_filename_from_task(user_input)
+
+        missing = validate_plan(result.final_plan)
+        if missing:
+            print(f"Warning: final plan is missing required sections: {missing}")
+
+        Path(plan_file).write_text(result.final_plan.rstrip() + "\n")
+        verdict = "APPROVED" if result.approved else "NO-CONSENSUS"
+        print(f"{verdict}: wrote {plan_file} after {len(result.iterations)} iteration(s)")
+        if not result.approved:
+            print(render_no_consensus_summary(result))
+        return 0
+
     # Use skills instead of inline prompts
     if action == "update":
         result = run_skill("update-plan", {
@@ -137,6 +228,8 @@ def cmd_plan(args) -> int:
         result = run_skill("create-plan", {
             "requirements": user_input,
             "output_file": plan_file or "",
+            "snapshot_content": snapshot_content,
+            "interview_spec": interview_spec_content,
         }, model="opus")
 
     if not result.success:
@@ -166,6 +259,214 @@ def cmd_plan(args) -> int:
     line_count = len(output.split("\n"))
     print(f"  {line_count} lines")
 
+    return 0
+
+
+def _derive_plan_filename_from_task(task: str) -> str:
+    """Return a `PLAN-<slug>.md` filename derived from a task description."""
+    return f"PLAN-{slug_from(task)}.md"
+
+
+def _autopilot_interview_phase(plan: AutopilotPlan, project_dir: Optional[str]) -> int:
+    if plan.skip_interview:
+        print("[autopilot] skipping interview phase (--skip-interview)")
+        return 0
+    from types import SimpleNamespace
+
+    interview_args = SimpleNamespace(
+        task=plan.task,
+        profile="standard",
+        slug=plan.slug,
+    )
+    print("[autopilot] phase: interview")
+    return cmd_interview(interview_args)
+
+
+def _autopilot_planning_phase(plan: AutopilotPlan, project_dir: Optional[str]) -> int:
+    from types import SimpleNamespace
+
+    if plan_artifact_exists(plan.plan_file, project_dir):
+        print(f"[autopilot] plan file already exists: {plan.plan_file} (skipping planning)")
+        return 0
+
+    plan_args = SimpleNamespace(
+        plan_file=plan.plan_file,
+        snapshot=None,
+        consensus=not plan.skip_consensus,
+    )
+
+    # cmd_plan reads from stdin for requirements when there is no interview
+    # spec — feed it the task via an in-memory replacement so autopilot can
+    # stay non-interactive after the interview phase.
+    original_stdin = sys.stdin
+    import io
+
+    sys.stdin = io.StringIO(plan.task + "\n")
+    try:
+        print("[autopilot] phase: planning")
+        return cmd_plan(plan_args)
+    finally:
+        sys.stdin = original_stdin
+
+
+def _autopilot_running_phase(plan: AutopilotPlan, project_dir: Optional[str]) -> int:
+    from types import SimpleNamespace
+
+    run_args = SimpleNamespace(
+        plan_file=plan.plan_file,
+        force=False,
+        step=False,
+        no_deslop=plan.no_deslop,
+    )
+    print("[autopilot] phase: running")
+    return cmd_run(run_args)
+
+
+def cmd_autopilot(args) -> int:
+    """
+    Sequence: interview → consensus plan → run (with finalize + deslop).
+
+    Each phase writes its own artifact so a failure in any one phase is
+    resumable via `dvx autopilot --resume <slug>` (or the phase-level
+    subcommand directly).
+    """
+    task: str = (args.task or "").strip()
+    resume_slug: Optional[str] = getattr(args, "resume", None)
+
+    if not task and not resume_slug:
+        print("Error: provide a task string or --resume <slug>.")
+        return 1
+
+    plan = build_plan_from_args(
+        task=task,
+        skip_interview=getattr(args, "skip_interview", False),
+        skip_consensus=getattr(args, "skip_consensus", False),
+        no_deslop=getattr(args, "no_deslop", False),
+        explicit_plan_file=getattr(args, "plan_file", None),
+        resume_slug=resume_slug,
+    )
+
+    print(f"[autopilot] task: {plan.task}")
+    print(f"[autopilot] slug: {plan.slug}")
+    print(f"[autopilot] plan file target: {plan.plan_file}")
+
+    rc = run_pipeline(
+        plan,
+        interview_fn=_autopilot_interview_phase,
+        planning_fn=_autopilot_planning_phase,
+        running_fn=_autopilot_running_phase,
+    )
+
+    summary = summarize_autopilot(plan, rc)
+    print()
+    print("=" * 60)
+    print("AUTOPILOT SUMMARY")
+    print("=" * 60)
+    print(summary)
+    write_autopilot_summary(plan, summary)
+    return rc
+
+
+def cmd_interview(args) -> int:
+    """
+    Launch an interactive deep-interview session for a task.
+
+    Claude runs the Socratic loop in-session; Python seeds the skill
+    prompt, persists resumable state, and checks for the resulting
+    `.dvx/specs/interview-<slug>.md` after the session exits.
+    """
+    task: str = args.task.strip()
+    if not task:
+        print("Error: task description is required.")
+        return 1
+
+    profile = args.profile
+    if profile not in PROFILE_THRESHOLDS:
+        print(f"Error: unknown profile '{profile}'. Valid: {sorted(PROFILE_THRESHOLDS)}")
+        return 1
+
+    slug = args.slug or slug_from(task)
+    project_dir: Optional[str] = None
+
+    state = load_interview_state(slug, project_dir)
+    if state is None:
+        threshold, max_rounds = get_profile(profile)
+        brownfield = Path(".git").exists()
+        state = new_interview_state(
+            task=task,
+            profile=profile,
+            brownfield=brownfield,
+            slug=slug,
+        )
+        save_interview_state(state, project_dir)
+        print(f"Starting deep-interview ({profile}, threshold {threshold:.2f}, max {max_rounds} rounds)")
+    else:
+        print(f"Resuming interview for slug '{slug}' at round {len(state.rounds) + 1}")
+    print(f"Task: {task}")
+
+    snapshot_content = load_latest_content(slug, project_dir) or ""
+    prior_transcript = render_transcript(state) if state.rounds else ""
+
+    skill_content = load_skill("interview")
+    prompt = (
+        skill_content.replace("$ARGUMENTS.task", task)
+        .replace("$ARGUMENTS.slug", slug)
+        .replace("$ARGUMENTS.profile", profile)
+        .replace("$ARGUMENTS.threshold", f"{state.threshold:.2f}")
+        .replace("$ARGUMENTS.max_rounds", str(state.max_rounds))
+        .replace("$ARGUMENTS.snapshot_content", snapshot_content)
+        .replace("$ARGUMENTS.prior_transcript", prior_transcript)
+    )
+
+    spec_path_hint = interview_spec_path(slug, project_dir)
+    prompt += (
+        "\n\n## Output path\n\n"
+        f"When the interview converges, write the finalized spec to "
+        f"`{spec_path_hint}` yourself (create the directory if missing). "
+        "Include the Metadata, Intent, Desired outcome, In-scope, "
+        "Out-of-scope / Non-goals, Decision boundaries, Constraints, "
+        "Acceptance criteria, Assumptions, and Transcript sections. "
+        "Only output `[INTERVIEW_COMPLETE]` once the file is on disk.\n"
+    )
+
+    interview_session_id = state.session_id
+    if not interview_session_id:
+        seed = start_session(prompt, cwd=project_dir)
+        if not seed.success or not seed.session_id:
+            reason = seed.block_reason or "failed to create interview session"
+            print(f"Error: {reason}")
+            return 1
+        interview_session_id = seed.session_id
+        state.session_id = interview_session_id
+        save_interview_state(state, project_dir)
+        if seed.output.strip():
+            print()
+            print(seed.output.strip())
+
+    print()
+    print("Launching interactive Claude session for the interview.")
+    print("Type `/exit` when the spec has been written to return to dvx.")
+    launch_interactive(
+        session_id=interview_session_id,
+        initial_prompt=None,
+        plan_file=None,
+        auto_explain=False,
+    )
+
+    print()
+    body = load_spec(slug, project_dir)
+    if body is None:
+        print(f"No spec was written. Run `dvx interview --slug {slug}` again to resume.")
+        return 1
+
+    missing = validate_spec(body)
+    if missing:
+        print(f"Warning: spec is missing required sections: {missing}")
+        print(f"Edit {interview_spec_path(slug, project_dir)} to add them.")
+
+    state.finished = True
+    save_interview_state(state, project_dir)
+    print(f"Interview complete. Spec at: {interview_spec_path(slug, project_dir)}")
     return 0
 
 
@@ -552,14 +853,14 @@ def find_continuation_queue(plan_file: str) -> Optional[str]:
     return None
 
 
-def run_with_continuation(plan_file: str, step_mode: bool = False) -> int:
+def run_with_continuation(plan_file: str, step_mode: bool = False, no_deslop: bool = False) -> int:
     """
     Run orchestrator and handle continuation queue on success.
 
     If the plan completes successfully and there's a continuation queue,
     re-exec dvx to process the next plan in the queue.
     """
-    result = run_orchestrator(plan_file, step_mode=step_mode)
+    result = run_orchestrator(plan_file, step_mode=step_mode, no_deslop=no_deslop)
 
     if result == 0:
         # Plan completed successfully - check for continuation
@@ -643,6 +944,7 @@ def cmd_run(args) -> int:
     # Check state first - skip sync for blocked/paused/complete states
     state = load_state(plan_file)
     step_mode = args.step
+    no_deslop = bool(getattr(args, "no_deslop", False))
 
     # Handle blocked state - launch interactive session to resolve
     if state is not None and state.phase == Phase.BLOCKED.value:
@@ -693,7 +995,7 @@ def cmd_run(args) -> int:
         if sync_result['synced'] > 0 or sync_result['added'] > 0:
             print(f"  Updated: {sync_result['synced']} synced, {sync_result['added']} added from plan markers")
 
-        return run_with_continuation(state.plan_file, step_mode=state.step_mode)
+        return run_with_continuation(state.plan_file, step_mode=state.step_mode, no_deslop=no_deslop)
 
     # === PLANNER: Sync state with plan file ===
     # This ensures the status tracking file matches the plan's [x] markers.
@@ -730,14 +1032,14 @@ def cmd_run(args) -> int:
         print("=" * 60)
         print()
 
-        return run_with_continuation(plan_file, step_mode=step_mode)
+        return run_with_continuation(plan_file, step_mode=step_mode, no_deslop=no_deslop)
 
     elif state.phase == Phase.PAUSED.value:
         print(f"Resuming from step-mode pause: {state.plan_file}")
         print()
 
         update_phase(Phase.IDLE, plan_file)
-        return run_with_continuation(state.plan_file, step_mode=state.step_mode)
+        return run_with_continuation(state.plan_file, step_mode=state.step_mode, no_deslop=no_deslop)
 
     elif state.phase == Phase.COMPLETE.value:
         print(f"Plan already complete: {state.plan_file}")
@@ -771,7 +1073,7 @@ def cmd_run(args) -> int:
             print("Step mode enabled")
             print()
 
-        return run_with_continuation(state.plan_file, step_mode=state.step_mode)
+        return run_with_continuation(state.plan_file, step_mode=state.step_mode, no_deslop=no_deslop)
 
 
 def cmd_watch(args) -> int:
@@ -884,6 +1186,8 @@ def cmd_status(args) -> int:
     print(f"Current task: {state.current_task_id or 'none'} - {state.current_task_title or ''}")
     print(f"Iteration: {state.iteration_count}/{state.max_iterations}")
     print(f"Step mode: {'yes' if state.step_mode else 'no'}")
+    if state.finalize_verdict is not None:
+        print(f"Finalize verdict: {state.finalize_verdict} (after {state.finalize_iterations} finalize iteration(s))")
     print(f"Started: {state.started_at}")
     print(f"Updated: {state.updated_at}")
     print()
@@ -981,6 +1285,7 @@ def main() -> int:
     run_parser.add_argument("plan_file", help="Path to PLAN-*.md file")
     run_parser.add_argument("-f", "--force", action="store_true", help="Force restart with new plan file")
     run_parser.add_argument("-s", "--step", action="store_true", help="Step mode: pause after each task for review")
+    run_parser.add_argument("--no-deslop", action="store_true", help="Skip the post-approval deslop cleanup pass")
     run_parser.set_defaults(func=cmd_run)
 
     # watch
@@ -1005,9 +1310,89 @@ def main() -> int:
     clean_parser.add_argument("plan_file", nargs="?", help="Path to PLAN-*.md file (optional, cleans all if omitted)")
     clean_parser.set_defaults(func=cmd_clean)
 
+    # autopilot
+    autopilot_parser = subparsers.add_parser(
+        "autopilot",
+        help="Sequence interview → consensus plan → run end-to-end",
+    )
+    autopilot_parser.add_argument(
+        "task",
+        nargs="?",
+        default="",
+        help="Task description to plan and build (omit with --resume)",
+    )
+    autopilot_parser.add_argument(
+        "--skip-interview",
+        action="store_true",
+        help="Skip the interview phase; use the task string as requirements directly",
+    )
+    autopilot_parser.add_argument(
+        "--skip-consensus",
+        action="store_true",
+        help="Skip the consensus loop; produce a single-perspective plan",
+    )
+    autopilot_parser.add_argument(
+        "--no-deslop",
+        action="store_true",
+        help="Skip the post-approval deslop cleanup pass",
+    )
+    autopilot_parser.add_argument(
+        "--plan-file",
+        dest="plan_file",
+        help="Use an existing plan file and start from the run phase",
+    )
+    autopilot_parser.add_argument(
+        "--resume",
+        help="Resume an in-progress autopilot run by slug",
+    )
+    autopilot_parser.set_defaults(func=cmd_autopilot)
+
+    # interview
+    interview_parser = subparsers.add_parser(
+        "interview",
+        help="Run a deep-interview session that produces an execution-ready spec",
+    )
+    interview_parser.add_argument("task", help="The task to clarify through interview")
+    interview_profile = interview_parser.add_mutually_exclusive_group()
+    interview_profile.add_argument(
+        "--quick",
+        dest="profile",
+        action="store_const",
+        const="quick",
+        help="Quick profile (threshold 0.30, max 5 rounds)",
+    )
+    interview_profile.add_argument(
+        "--standard",
+        dest="profile",
+        action="store_const",
+        const="standard",
+        help="Standard profile (threshold 0.20, max 12 rounds) — default",
+    )
+    interview_profile.add_argument(
+        "--deep",
+        dest="profile",
+        action="store_const",
+        const="deep",
+        help="Deep profile (threshold 0.15, max 20 rounds)",
+    )
+    interview_parser.add_argument(
+        "--slug",
+        help="Override the auto-derived slug for state and spec filenames",
+    )
+    interview_parser.set_defaults(func=cmd_interview, profile="standard")
+
     # plan
     plan_parser = subparsers.add_parser("plan", help="Generate or update a plan file with Claude")
     plan_parser.add_argument("plan_file", nargs="?", help="Path to PLAN-*.md file (optional)")
+    plan_parser.add_argument(
+        "--snapshot",
+        help="Path to a .dvx/context/ snapshot to use as grounding context",
+    )
+    plan_parser.add_argument(
+        "--consensus",
+        action="store_true",
+        help="Run Planner/Architect/Critic consensus loop (up to 5 iterations)",
+    )
     plan_parser.set_defaults(func=cmd_plan)
 
     args = parser.parse_args()

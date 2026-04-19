@@ -27,6 +27,15 @@ Add to your shell config (~/.bashrc, ~/.zshrc, etc.):
 export PATH="${HOME}/.dvx/bin:$PATH"
 ```
 
+### Optional dependencies
+
+```bash
+cd ~/.dvx && source .venv/bin/activate
+pip install -e ".[dev]"        # pytest, ruff
+pip install -e ".[automation]" # invoke, fabric
+pip install -e ".[ai]"         # anthropic
+```
+
 ## Usage
 
 ```bash

@@ -53,20 +53,5 @@ echo "Then reload your shell or run:"
 echo
 echo "    source ~/.bashrc  # or ~/.zshrc"
 echo
-echo "To install optional dependencies later:"
-echo "    cd ~/.dvx && source .venv/bin/activate"
-echo "    pip install -e \".[dev]\"       # pytest, ruff"
-echo "    pip install -e \".[automation]\" # invoke, fabric"
-echo "    pip install -e \".[ai]\"         # anthropic"
-echo
-echo "Usage:"
-echo "    dvx plan [PLAN.md]          # Create or update a plan (opens editor if no stdin)"
-echo "    echo \"Add auth\" | dvx plan PLAN-auth.md"
-echo "    dvx run PLAN.md             # Start or resume orchestration for a plan"
-echo "    dvx run -s PLAN.md          # Step mode: pause after each task"
-echo "    dvx run queue.yaml          # Run plans sequentially from a YAML queue"
-echo "    dvx watch                   # Process the next plan from ./todo -> ./doing -> ./done"
-echo "    dvx status PLAN.md          # Show current status for a plan"
-echo "    dvx decisions PLAN.md       # Show recorded decisions for a plan"
-echo "    dvx clean [PLAN.md]         # Clean all state or one plan's state"
+echo "Run \`dvx --help\` to see available commands."
 echo
