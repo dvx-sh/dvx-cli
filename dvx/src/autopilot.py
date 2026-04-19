@@ -53,9 +53,12 @@ def interview_artifact_exists(slug: str, project_dir: Optional[str] = None) -> b
     return interview_spec_path(slug, project_dir).exists()
 
 
-def plan_artifact_exists(slug: str, project_dir: Optional[str] = None) -> bool:
+def plan_artifact_exists(plan_file: str, project_dir: Optional[str] = None) -> bool:
+    path = Path(plan_file)
+    if path.is_absolute():
+        return path.exists()
     cwd = Path(project_dir) if project_dir else Path.cwd()
-    return (cwd / derive_plan_filename(slug)).exists()
+    return (cwd / path).exists()
 
 
 def next_phase(current: Optional[str]) -> str:
@@ -93,7 +96,7 @@ def resolve_starting_phase(
         # Treat missing/unknown resume state as a fresh start for safety.
         logger.info("No resumable phase found; starting from first phase")
 
-    if plan_artifact_exists(plan.slug, project_dir):
+    if plan_artifact_exists(plan.plan_file, project_dir):
         return PHASE_RUNNING
     if plan.skip_interview and plan.skip_consensus:
         return PHASE_RUNNING

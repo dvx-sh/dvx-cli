@@ -289,6 +289,7 @@ class TestExtractLastQuestion:
 class TestInterviewStateRoundTrip:
     def test_to_dict_from_dict(self):
         state = new_state(task="t", profile="deep", brownfield=True, slug="t")
+        state.session_id = "session-123"
         record_round(
             state,
             "Q",
@@ -298,5 +299,6 @@ class TestInterviewStateRoundTrip:
         restored = InterviewState.from_dict(state.to_dict())
         assert restored.task == state.task
         assert restored.brownfield is True
+        assert restored.session_id == "session-123"
         assert len(restored.rounds) == 1
         assert restored.rounds[0].question == "Q"

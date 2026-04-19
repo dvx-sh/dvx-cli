@@ -213,3 +213,4 @@ doing/*
 !doing/.gitkeep
 done/*
 !done/.gitkeep
+.omx/

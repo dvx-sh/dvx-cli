@@ -147,6 +147,19 @@ class TestResolveStartingPhase:
         Path("PLAN-x.md").write_text("# plan\n")
         assert resolve_starting_phase(plan) == PHASE_RUNNING
 
+    def test_explicit_plan_file_on_disk_skips_to_running(self):
+        Path("plans").mkdir()
+        Path("plans/custom.md").write_text("# plan\n")
+        plan = AutopilotPlan(
+            task="x",
+            slug="x",
+            plan_file="plans/custom.md",
+            skip_interview=False,
+            skip_consensus=False,
+            no_deslop=False,
+        )
+        assert resolve_starting_phase(plan) == PHASE_RUNNING
+
     def test_skip_both_starts_at_running(self):
         plan = AutopilotPlan(
             task="x",

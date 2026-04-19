@@ -10,10 +10,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from orchestrator import (
     CHANGED_FILES_MANIFEST,
+    SESSION_BASE_HEAD,
     compute_changed_files,
     is_deslop_noop,
     load_changed_files_manifest,
+    load_session_base_head,
     write_changed_files_manifest,
+    write_session_base_head,
 )
 
 
@@ -68,6 +71,40 @@ class TestChangedFilesManifest:
             os.chdir(cwd)
 
 
+class TestSessionBaseHead:
+    def setup_method(self):
+        self.temp_dir = tempfile.mkdtemp()
+
+    def teardown_method(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_write_and_load(self):
+        import os
+
+        cwd = os.getcwd()
+        try:
+            os.chdir(self.temp_dir)
+            plan_file = "PLAN-x.md"
+            write_session_base_head(plan_file, "abc123")
+            assert load_session_base_head(plan_file) == "abc123"
+        finally:
+            os.chdir(cwd)
+
+    def test_file_location(self):
+        import os
+
+        cwd = os.getcwd()
+        try:
+            os.chdir(self.temp_dir)
+            plan_file = "PLAN-x.md"
+            path = write_session_base_head(plan_file, "abc123")
+            assert path.name == SESSION_BASE_HEAD
+            assert "PLAN-x.md" in str(path)
+            assert ".dvx" in str(path)
+        finally:
+            os.chdir(cwd)
+
+
 class TestComputeChangedFiles:
     def setup_method(self):
         self.temp_dir = tempfile.mkdtemp()
@@ -102,6 +139,38 @@ class TestComputeChangedFiles:
             result = compute_changed_files("HEAD")
             assert "seed.txt" in result
             assert "new.txt" in result
+        finally:
+            os.chdir(cwd)
+
+    def test_captures_files_committed_since_session_start(self):
+        import os
+
+        cwd = os.getcwd()
+        try:
+            os.chdir(self.temp_dir)
+            start_head = _git(["rev-parse", "HEAD"], self.temp_dir).stdout.strip()
+            Path("app.py").write_text("print('ok')\n")
+            _git(["add", "app.py"], self.temp_dir)
+            _git(["commit", "-m", "add app"], self.temp_dir)
+
+            result = compute_changed_files(start_head)
+
+            assert "app.py" in result
+        finally:
+            os.chdir(cwd)
+
+    def test_filters_dvx_metadata_noise(self):
+        import os
+
+        cwd = os.getcwd()
+        try:
+            os.chdir(self.temp_dir)
+            Path(".dvx").mkdir()
+            Path(".dvx/state.json").write_text("{}")
+
+            result = compute_changed_files("HEAD")
+
+            assert ".dvx/state.json" not in result
         finally:
             os.chdir(cwd)
 

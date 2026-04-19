@@ -29,7 +29,7 @@ from autopilot import (
 from autopilot import (
     summarize as summarize_autopilot,
 )
-from claude_session import launch_interactive
+from claude_session import launch_interactive, start_session
 from consensus import (
     MAX_ITERATIONS,
     make_skill_caller,
@@ -285,7 +285,7 @@ def _autopilot_interview_phase(plan: AutopilotPlan, project_dir: Optional[str]) 
 def _autopilot_planning_phase(plan: AutopilotPlan, project_dir: Optional[str]) -> int:
     from types import SimpleNamespace
 
-    if plan_artifact_exists(plan.slug, project_dir):
+    if plan_artifact_exists(plan.plan_file, project_dir):
         print(f"[autopilot] plan file already exists: {plan.plan_file} (skipping planning)")
         return 0
 
@@ -429,10 +429,29 @@ def cmd_interview(args) -> int:
         "Only output `[INTERVIEW_COMPLETE]` once the file is on disk.\n"
     )
 
+    interview_session_id = state.session_id
+    if not interview_session_id:
+        seed = start_session(prompt, cwd=project_dir)
+        if not seed.success or not seed.session_id:
+            reason = seed.block_reason or "failed to create interview session"
+            print(f"Error: {reason}")
+            return 1
+        interview_session_id = seed.session_id
+        state.session_id = interview_session_id
+        save_interview_state(state, project_dir)
+        if seed.output.strip():
+            print()
+            print(seed.output.strip())
+
     print()
     print("Launching interactive Claude session for the interview.")
     print("Type `/exit` when the spec has been written to return to dvx.")
-    launch_interactive(initial_prompt=prompt, plan_file=None, auto_explain=False)
+    launch_interactive(
+        session_id=interview_session_id,
+        initial_prompt=None,
+        plan_file=None,
+        auto_explain=False,
+    )
 
     print()
     body = load_spec(slug, project_dir)

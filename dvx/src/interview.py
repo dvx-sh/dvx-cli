@@ -82,6 +82,7 @@ class InterviewState:
     max_rounds: int
     brownfield: bool = False
     context_snapshot_path: Optional[str] = None
+    session_id: Optional[str] = None
     rounds: list[InterviewRound] = field(default_factory=list)
     started_at: str = ""
     updated_at: str = ""

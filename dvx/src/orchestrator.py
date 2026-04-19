@@ -882,6 +882,7 @@ Focus on addressing the specific issues listed above. Do not make unrelated chan
 
 
 CHANGED_FILES_MANIFEST = "changed-files.txt"
+SESSION_BASE_HEAD = "session-base-head.txt"
 DESLOP_LOG = "deslop-log.md"
 
 
@@ -889,14 +890,14 @@ def compute_changed_files(base_ref: str = "HEAD") -> list[str]:
     """
     Return files modified since `base_ref` in the current working tree.
 
-    Combines `git diff --name-only HEAD` with untracked files from
-    `git status --porcelain` so the manifest reflects both committed and
-    uncommitted work since the session started.
+    Combines `git diff --name-only <base_ref> HEAD` with working tree
+    changes from `git status --porcelain` so the result reflects both
+    committed and uncommitted session work.
     """
     changed: set[str] = set()
     try:
         diff = subprocess.run(
-            ["git", "diff", "--name-only", base_ref],
+            ["git", "diff", "--name-only", base_ref, "HEAD"],
             capture_output=True,
             text=True,
             timeout=30,
@@ -904,7 +905,7 @@ def compute_changed_files(base_ref: str = "HEAD") -> list[str]:
         if diff.returncode == 0:
             for line in diff.stdout.splitlines():
                 line = line.strip()
-                if line:
+                if _is_session_source_file(line):
                     changed.add(line)
         status = subprocess.run(
             ["git", "status", "--porcelain"],
@@ -920,11 +921,16 @@ def compute_changed_files(base_ref: str = "HEAD") -> list[str]:
                 path = line[3:].strip()
                 if " -> " in path:
                     path = path.split(" -> ", 1)[1]
-                if path:
+                if _is_session_source_file(path):
                     changed.add(path)
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"Failed to compute changed files: {exc}")
     return sorted(changed)
+
+
+def _is_session_source_file(path: str) -> bool:
+    normalized = path.strip()
+    return bool(normalized) and not normalized.startswith(".dvx/")
 
 
 def write_changed_files_manifest(plan_file: str, files: list[str]) -> Path:
@@ -933,6 +939,22 @@ def write_changed_files_manifest(plan_file: str, files: list[str]) -> Path:
     path = dvx_dir / CHANGED_FILES_MANIFEST
     path.write_text("\n".join(files) + ("\n" if files else ""))
     return path
+
+
+def write_session_base_head(plan_file: str, head_sha: str) -> Path:
+    """Persist the starting HEAD for the current orchestration session."""
+    dvx_dir = ensure_dvx_dir(plan_file)
+    path = dvx_dir / SESSION_BASE_HEAD
+    path.write_text(head_sha.strip() + "\n" if head_sha.strip() else "")
+    return path
+
+
+def load_session_base_head(plan_file: str) -> str:
+    """Load the starting HEAD for the current orchestration session."""
+    path = get_dvx_dir(plan_file) / SESSION_BASE_HEAD
+    if not path.exists():
+        return ""
+    return path.read_text().strip()
 
 
 def load_changed_files_manifest(plan_file: str) -> list[str]:
@@ -986,7 +1008,8 @@ def _run_deslop_pass(plan_file: str, state: State) -> None:
 
     changed = load_changed_files_manifest(plan_file)
     if not changed:
-        changed = compute_changed_files(base_ref="HEAD")
+        base_head = load_session_base_head(plan_file) or "HEAD"
+        changed = compute_changed_files(base_ref=base_head)
         if changed:
             write_changed_files_manifest(plan_file, changed)
 
@@ -1568,11 +1591,10 @@ def _run_orchestrator_inner(plan_file: str, step_mode: bool = False, no_deslop: 
         state.step_mode = step_mode
         save_state(state)
 
-    # Freeze the pre-run HEAD SHA so deslop can scope its manifest to
-    # files changed during this session, not the whole branch history.
-    if not (get_dvx_dir(plan_file) / CHANGED_FILES_MANIFEST).exists():
-        changed = compute_changed_files("HEAD")
-        write_changed_files_manifest(plan_file, changed)
+    # Freeze the pre-run HEAD so deslop can later recover files that were
+    # committed during this orchestration session.
+    if not load_session_base_head(plan_file):
+        write_session_base_head(plan_file, _current_head_sha())
 
     logger.info(f"Starting orchestration of {plan_file}")
 
