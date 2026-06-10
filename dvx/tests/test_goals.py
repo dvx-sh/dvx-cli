@@ -1,0 +1,1471 @@
+"""Tests for goal queue processing (dvx watch / dvx clear)."""
+
+import json
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+
+import goals as goals_module
+from claude_session import SessionResult
+from goals import (
+    STATUS_BRANCHED,
+    STATUS_CLAIMED,
+    STATUS_COMMITTED,
+    STATUS_GOAL_DELETED,
+    STATUS_MERGED,
+    STATUS_RAN,
+    GoalState,
+    _step_create_branch,
+    branch_name_for_goal,
+    claim_next_goal,
+    clear_goal_state,
+    current_goal_content_file,
+    enqueue_new_goals,
+    goals_state_file,
+    load_goal_state,
+    process_current_goal,
+    queued_goal_snapshot_file,
+    queued_goal_snapshot_manifest_file,
+    run_goal_watch,
+    save_goal_state,
+    scan_goal_files,
+)
+
+
+def run_git(args, cwd: str) -> str:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
+def make_runner(side_effect=None, success=True):
+    """Build a fake Claude runner that records calls."""
+    calls = []
+
+    def runner(arg):
+        calls.append(arg)
+        if side_effect:
+            side_effect(arg)
+        return SessionResult(output="", session_id="test-session", success=success)
+
+    runner.calls = calls
+    return runner
+
+
+def noop_commit_runner(goals_dir):
+    return SessionResult(output="", session_id="test-session", success=True)
+
+
+def fail_goal_runner(content):
+    raise AssertionError("goal runner should not be called")
+
+
+def fail_commit_runner(goals_dir):
+    raise AssertionError("commit runner should not be called")
+
+
+class GitRepoTestCase:
+    """Base: temp git repo on branch 'work' with a goals directory."""
+
+    def setup_method(self):
+        self.temp_dir = tempfile.mkdtemp()
+        run_git(["init", "-b", "main"], self.temp_dir)
+        run_git(["config", "user.name", "DVX Test"], self.temp_dir)
+        run_git(["config", "user.email", "dvx@example.com"], self.temp_dir)
+        (Path(self.temp_dir) / "README.md").write_text("# test\n")
+        run_git(["add", "README.md"], self.temp_dir)
+        run_git(["commit", "-m", "init"], self.temp_dir)
+        run_git(["checkout", "-b", "work"], self.temp_dir)
+        (Path(self.temp_dir) / "goals").mkdir()
+
+    def teardown_method(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def new_state(self) -> GoalState:
+        return GoalState(watch_branch="work", goals_dir="./goals")
+
+    def add_goal(self, name: str, content: str = "Do the thing.\n") -> Path:
+        goal = Path(self.temp_dir) / "goals" / name
+        goal.write_text(content)
+        return goal
+
+
+class TestGoalStatePersistence:
+    def setup_method(self):
+        self.temp_dir = tempfile.mkdtemp()
+
+    def teardown_method(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_load_returns_none_when_missing(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        assert load_goal_state() is None
+
+    def test_save_load_roundtrip(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        state = GoalState(
+            watch_branch="work",
+            goals_dir="./goals",
+            queue=["GOAL-b.md"],
+            current={"goal_file": "GOAL-a.md", "branch": "goal-a", "status": STATUS_BRANCHED},
+        )
+        save_goal_state(state)
+
+        loaded = load_goal_state()
+        assert loaded is not None
+        assert loaded.watch_branch == "work"
+        assert loaded.queue == ["GOAL-b.md"]
+        assert loaded.current["status"] == STATUS_BRANCHED
+        assert loaded.updated_at is not None
+
+    def test_save_leaves_no_temp_file(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        save_goal_state(GoalState(watch_branch="work", goals_dir="./goals"))
+
+        state_dir = goals_state_file().parent
+        assert goals_state_file().exists()
+        assert list(state_dir.glob("*.tmp")) == []
+        # The state file must always be valid JSON.
+        json.loads(goals_state_file().read_text())
+
+    def test_clear_removes_state_but_not_goals_dir(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        goals_dir = Path("goals")
+        goals_dir.mkdir()
+        goal = goals_dir / "GOAL-keep-me.md"
+        goal.write_text("# goal\n")
+        save_goal_state(GoalState(watch_branch="work", goals_dir="./goals", queue=["GOAL-keep-me.md"]))
+
+        assert clear_goal_state() is True
+
+        assert load_goal_state() is None
+        assert not goals_state_file().parent.exists()
+        assert goal.exists()
+
+    def test_clear_returns_false_when_no_state(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        assert clear_goal_state() is False
+
+
+class TestBranchNameForGoal:
+    def test_simple_goal_file(self):
+        assert branch_name_for_goal("GOAL-add-feature-x.md") == "goal-add-feature-x"
+
+    def test_sanitizes_odd_characters(self):
+        assert branch_name_for_goal("GOAL-Add Feature!!.md") == "goal-add-feature"
+
+    def test_raises_when_nothing_usable(self):
+        with pytest.raises(ValueError):
+            branch_name_for_goal("---.md")
+
+
+class TestQueueScanning(GitRepoTestCase):
+    def test_scan_only_matches_goal_files(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        self.add_goal("GOAL-one.md")
+        (Path("goals") / "notes.txt").write_text("not a goal\n")
+        (Path("goals") / "PLAN-x.md").write_text("not a goal\n")
+
+        assert scan_goal_files(Path("goals")) == ["GOAL-one.md"]
+
+    def test_enqueue_adds_new_goals_once(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        self.add_goal("GOAL-one.md")
+        state = self.new_state()
+
+        assert enqueue_new_goals(state) == ["GOAL-one.md"]
+        assert enqueue_new_goals(state) == []
+        assert state.queue == ["GOAL-one.md"]
+
+    def test_enqueue_skips_current_goal(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        self.add_goal("GOAL-one.md")
+        state = self.new_state()
+        state.current = {"goal_file": "GOAL-one.md", "branch": "goal-one", "status": STATUS_RAN}
+
+        assert enqueue_new_goals(state) == []
+
+    def test_enqueue_skips_failed_goal_files_that_remain(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        self.add_goal("GOAL-empty.md", "   \n")
+        state = self.new_state()
+        state.queue = ["GOAL-empty.md"]
+
+        assert claim_next_goal(state) is None
+        assert [f["goal_file"] for f in state.failed] == ["GOAL-empty.md"]
+
+        assert enqueue_new_goals(state) == []
+        assert state.queue == []
+
+    def test_claim_snapshots_content_and_pops_queue(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        self.add_goal("GOAL-one.md", "Build feature one.\n")
+        state = self.new_state()
+        enqueue_new_goals(state)
+
+        current = claim_next_goal(state)
+
+        assert current["goal_file"] == "GOAL-one.md"
+        assert current["branch"] == "goal-one"
+        assert current["status"] == STATUS_CLAIMED
+        assert state.queue == []
+        assert current_goal_content_file().read_text() == "Build feature one.\n"
+        assert current["dirty_baseline"] == []
+        assert state.blocked is None
+        # Claim is persisted so a crash right after still knows the goal.
+        assert load_goal_state().current["goal_file"] == "GOAL-one.md"
+
+    def test_claim_honors_user_edit_to_queued_goal_before_claim(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        goal = self.add_goal("GOAL-one.md", "Original goal.\n")
+        state = self.new_state()
+        enqueue_new_goals(state)
+        goal.write_text("Edited before claim.\n")
+
+        current = claim_next_goal(state)
+
+        assert current["goal_file"] == "GOAL-one.md"
+        assert current_goal_content_file().read_text() == "Edited before claim.\n"
+        assert goal.read_text() == "Edited before claim.\n"
+
+    def test_claim_treats_user_deleted_queued_goal_as_missing(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        goal = self.add_goal("GOAL-one.md", "Original goal.\n")
+        state = self.new_state()
+        enqueue_new_goals(state)
+        goal.unlink()
+
+        current = claim_next_goal(state)
+
+        assert current is None
+        assert not goal.exists()
+        assert state.current is None
+        assert state.queue == []
+        assert [f["goal_file"] for f in state.failed] == ["GOAL-one.md"]
+        assert state.failed[0]["reason"] == "missing"
+
+    def test_claim_blocks_on_preexisting_untracked_dirty_tree(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        Path("local.txt").write_text("user work before watcher\n")
+        goal = self.add_goal("GOAL-noop.md")
+        state = self.new_state()
+        enqueue_new_goals(state)
+
+        assert claim_next_goal(state) is None
+
+        assert state.current is None
+        assert state.queue == ["GOAL-noop.md"]
+        assert state.failed == []
+        assert state.blocked["goal_file"] == "GOAL-noop.md"
+        assert state.blocked["dirty_paths"] == ["local.txt"]
+        assert "working tree is dirty" in state.blocked["reason"]
+        assert goal.exists()
+        assert Path("local.txt").read_text() == "user work before watcher\n"
+
+    def test_claim_blocks_on_preexisting_tracked_dirty_tree(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        Path("tracked.txt").write_text("clean\n")
+        run_git(["add", "tracked.txt"], self.temp_dir)
+        run_git(["commit", "-m", "add tracked"], self.temp_dir)
+        Path("tracked.txt").write_text("user edit before watcher\n")
+        self.add_goal("GOAL-noop.md")
+        state = self.new_state()
+        enqueue_new_goals(state)
+
+        assert claim_next_goal(state) is None
+
+        assert state.current is None
+        assert state.queue == ["GOAL-noop.md"]
+        assert state.blocked["dirty_paths"] == ["tracked.txt"]
+
+    def test_claim_after_dirty_tree_cleanup_retries_same_goal(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        dirty = Path("local.txt")
+        dirty.write_text("user work before watcher\n")
+        self.add_goal("GOAL-noop.md")
+        state = self.new_state()
+        enqueue_new_goals(state)
+
+        assert claim_next_goal(state) is None
+        dirty.unlink()
+
+        current = claim_next_goal(state)
+
+        assert current["goal_file"] == "GOAL-noop.md"
+        assert state.queue == []
+        assert state.blocked is None
+
+    def test_claim_rejects_branch_name_collision(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        run_git(["branch", "goal-collision"], self.temp_dir)
+        self.add_goal("GOAL-collision.md", "This name collides.\n")
+        state = self.new_state()
+        enqueue_new_goals(state)
+
+        assert claim_next_goal(state) is None
+
+        assert state.current is None
+        assert state.queue == []
+        assert [f["goal_file"] for f in state.failed] == ["GOAL-collision.md"]
+        assert "already exists" in state.failed[0]["reason"]
+
+    def test_claim_allows_hidden_relative_goals_dir(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        hidden_goals = Path(".goals")
+        hidden_goals.mkdir()
+        (hidden_goals / "GOAL-hidden.md").write_text("Hidden inbox goal.\n")
+        state = GoalState(watch_branch="work", goals_dir="./.goals")
+        enqueue_new_goals(state)
+
+        current = claim_next_goal(state)
+
+        assert current["goal_file"] == "GOAL-hidden.md"
+        assert state.blocked is None
+
+    def test_claim_skips_empty_and_missing_goals(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        self.add_goal("GOAL-empty.md", "   \n")
+        state = self.new_state()
+        state.queue = ["GOAL-vanished.md", "GOAL-empty.md", "GOAL-real.md"]
+        self.add_goal("GOAL-real.md", "Real goal.\n")
+
+        current = claim_next_goal(state)
+
+        assert current["goal_file"] == "GOAL-real.md"
+        assert [f["goal_file"] for f in state.failed] == ["GOAL-vanished.md", "GOAL-empty.md"]
+
+    def test_claim_returns_none_on_empty_queue(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        state = self.new_state()
+        assert claim_next_goal(state) is None
+
+
+class TestProcessGoal(GitRepoTestCase):
+    def test_create_branch_persists_watcher_ownership_before_outer_transition(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        self.add_goal("GOAL-crash-window.md")
+        state = self.new_state()
+        enqueue_new_goals(state)
+        claim_next_goal(state)
+
+        ok, error = _step_create_branch(state)
+
+        assert ok, error
+        assert state.current["branch_created_by_watcher"] is True
+        # Simulate a crash before process_current_goal records STATUS_BRANCHED.
+        recovered = load_goal_state()
+        assert recovered.current["status"] == STATUS_CLAIMED
+        assert recovered.current["branch_created_by_watcher"] is True
+
+    def test_recovers_if_crash_occurs_after_branch_create_before_ownership_save(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        self.add_goal("GOAL-crash-window.md")
+        state = self.new_state()
+        enqueue_new_goals(state)
+        claim_next_goal(state)
+
+        real_save_goal_state = goals_module.save_goal_state
+
+        def crash_after_branch_exists(state_to_save, project_dir=None):
+            branch = state_to_save.current["branch"]
+            exists = subprocess.run(
+                ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+                cwd=self.temp_dir,
+            ).returncode == 0
+            if exists:
+                raise RuntimeError("crash after branch create")
+            real_save_goal_state(state_to_save, project_dir)
+
+        monkeypatch.setattr(goals_module, "save_goal_state", crash_after_branch_exists)
+        with pytest.raises(RuntimeError, match="crash after branch create"):
+            _step_create_branch(state)
+
+        monkeypatch.setattr(goals_module, "save_goal_state", real_save_goal_state)
+        recovered = load_goal_state()
+        assert recovered.current["status"] == STATUS_CLAIMED
+        assert recovered.current["branch_created_by_watcher"] is False
+
+        ok, error = process_current_goal(
+            recovered, claude_runner=make_runner(), commit_runner=noop_commit_runner
+        )
+
+        assert ok, error
+        assert load_goal_state().current is None
+        assert run_git(["branch", "--list", "goal-crash-window"], self.temp_dir) == ""
+
+    def test_happy_path_runs_merges_and_cleans_up(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        self.add_goal("GOAL-add-feature-x.md", "Add feature x.\n")
+        self.add_goal("GOAL-later.md", "A queued goal that must not be committed.\n")
+        state = self.new_state()
+        enqueue_new_goals(state)
+        claim_next_goal(state)
+
+        def implement(content):
+            assert "Add feature x." in content
+            Path("feature.txt").write_text("implemented\n")
+
+        claude_runner = make_runner(side_effect=implement)
+
+        def commit_in_groups(goals_dir):
+            run_git(["add", "feature.txt"], self.temp_dir)
+            run_git(["commit", "-m", "feat: add feature x"], self.temp_dir)
+            return SessionResult(output="", session_id="s", success=True)
+
+        ok, error = process_current_goal(
+            state, claude_runner=claude_runner, commit_runner=commit_in_groups
+        )
+
+        assert ok, error
+        assert claude_runner.calls and claude_runner.calls[0].startswith("Add feature x.")
+        # Back on the watch branch with the work merged in.
+        assert run_git(["rev-parse", "--abbrev-ref", "HEAD"], self.temp_dir) == "work"
+        assert (Path(self.temp_dir) / "feature.txt").exists()
+        merge_subject = run_git(["log", "-1", "--pretty=%s"], self.temp_dir)
+        assert "goal-add-feature-x" in merge_subject
+        # Working branch deleted, goal file deleted, queued goal untouched.
+        branches = run_git(["branch", "--list", "goal-add-feature-x"], self.temp_dir)
+        assert branches == ""
+        assert not (Path(self.temp_dir) / "goals" / "GOAL-add-feature-x.md").exists()
+        assert (Path(self.temp_dir) / "goals" / "GOAL-later.md").exists()
+        # State advanced: nothing current, completion recorded, persisted.
+        assert state.current is None
+        assert [c["goal_file"] for c in state.completed] == ["GOAL-add-feature-x.md"]
+        assert load_goal_state().current is None
+
+    def test_fallback_commit_excludes_goals_and_dvx_state(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        self.add_goal("GOAL-add-feature-x.md")
+        self.add_goal("GOAL-later.md")
+        state = self.new_state()
+        enqueue_new_goals(state)
+        claim_next_goal(state)
+
+        claude_runner = make_runner(
+            side_effect=lambda content: Path("feature.txt").write_text("done\n")
+        )
+
+        # The logical-groups session commits nothing; the fallback must.
+        ok, error = process_current_goal(
+            state, claude_runner=claude_runner, commit_runner=noop_commit_runner
+        )
+
+        assert ok, error
+        tracked = run_git(["ls-files"], self.temp_dir).splitlines()
+        assert "feature.txt" in tracked
+        assert not any(p.startswith("goals/") for p in tracked)
+        assert not any(p.startswith(".dvx/") for p in tracked)
+        assert (Path(self.temp_dir) / "goals" / "GOAL-later.md").exists()
+
+    def test_fallback_commit_excludes_absolute_goals_dir(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        goals_dir = str(Path(self.temp_dir) / "goals")
+        self.add_goal("GOAL-add-feature-x.md")
+        self.add_goal("GOAL-later.md")
+        state = GoalState(watch_branch="work", goals_dir=goals_dir)
+        enqueue_new_goals(state)
+        claim_next_goal(state)
+
+        claude_runner = make_runner(
+            side_effect=lambda content: Path("feature.txt").write_text("done\n")
+        )
+
+        ok, error = process_current_goal(
+            state, claude_runner=claude_runner, commit_runner=noop_commit_runner
+        )
+
+        assert ok, error
+        tracked = run_git(["ls-files"], self.temp_dir).splitlines()
+        assert "feature.txt" in tracked
+        assert not any(p.startswith("goals/") for p in tracked)
+        assert (Path(self.temp_dir) / "goals" / "GOAL-later.md").exists()
+
+    def test_successful_commit_runner_cannot_commit_excluded_paths(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        self.add_goal("GOAL-add-feature-x.md")
+        self.add_goal("GOAL-later.md")
+        state = self.new_state()
+        enqueue_new_goals(state)
+        claim_next_goal(state)
+
+        claude_runner = make_runner(
+            side_effect=lambda content: Path("feature.txt").write_text("done\n")
+        )
+
+        def commit_everything(goals_dir):
+            run_git(["add", "-A"], self.temp_dir)
+            run_git(["commit", "-m", "bad: commit everything"], self.temp_dir)
+            return SessionResult(output="", session_id="s", success=True)
+
+        ok, error = process_current_goal(
+            state, claude_runner=claude_runner, commit_runner=commit_everything
+        )
+
+        assert ok is False
+        assert "excluded paths" in error
+        assert run_git(["rev-parse", "--abbrev-ref", "HEAD"], self.temp_dir) == "goal-add-feature-x"
+        assert state.current["status"] == STATUS_GOAL_DELETED
+        run_git(["checkout", "work"], self.temp_dir)
+        tracked = run_git(["ls-files"], self.temp_dir).splitlines()
+        assert "feature.txt" not in tracked
+        assert not any(p.startswith("goals/") for p in tracked)
+        assert not any(p.startswith(".dvx/") for p in tracked)
+
+    def test_preexisting_dirty_paths_are_blocked_before_goal_runs(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        Path("local.txt").write_text("user work before watcher\n")
+        self.add_goal("GOAL-noop.md")
+        state = self.new_state()
+        enqueue_new_goals(state)
+
+        assert claim_next_goal(state) is None
+
+        assert state.current is None
+        assert state.queue == ["GOAL-noop.md"]
+        assert state.blocked["dirty_paths"] == ["local.txt"]
+        tracked = run_git(["ls-files"], self.temp_dir).splitlines()
+        assert "local.txt" not in tracked
+        assert Path("local.txt").read_text() == "user work before watcher\n"
+
+    def test_no_changes_still_completes(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        self.add_goal("GOAL-noop.md")
+        state = self.new_state()
+        enqueue_new_goals(state)
+        claim_next_goal(state)
+
+        ok, error = process_current_goal(
+            state, claude_runner=make_runner(), commit_runner=noop_commit_runner
+        )
+
+        assert ok, error
+        assert state.current is None
+        assert run_git(["rev-parse", "--abbrev-ref", "HEAD"], self.temp_dir) == "work"
+
+    def test_claude_failure_preserves_state_for_retry(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        self.add_goal("GOAL-add-feature-x.md")
+        state = self.new_state()
+        enqueue_new_goals(state)
+        claim_next_goal(state)
+
+        ok, error = process_current_goal(
+            state,
+            claude_runner=make_runner(success=False),
+            commit_runner=noop_commit_runner,
+        )
+
+        assert ok is False
+        assert "Claude Code failed" in error
+        # The branch step completed; the run step did not - retry resumes there.
+        assert state.current["status"] == STATUS_BRANCHED
+        assert load_goal_state().current["status"] == STATUS_BRANCHED
+
+        # Retry with a working runner completes the goal.
+        ok, error = process_current_goal(
+            state, claude_runner=make_runner(), commit_runner=noop_commit_runner
+        )
+        assert ok, error
+        assert state.current is None
+
+    def test_merge_conflict_aborts_and_keeps_state(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        self.add_goal("GOAL-conflict.md")
+        state = self.new_state()
+        enqueue_new_goals(state)
+        claim_next_goal(state)
+
+        # Diverge: goal branch and watch branch both change the same file.
+        ok, error = _step_create_branch(state)
+        assert ok, error
+        Path("clash.txt").write_text("goal version\n")
+        run_git(["add", "clash.txt"], self.temp_dir)
+        run_git(["commit", "-m", "goal change"], self.temp_dir)
+        run_git(["checkout", "work"], self.temp_dir)
+        Path("clash.txt").write_text("watch version\n")
+        run_git(["add", "clash.txt"], self.temp_dir)
+        run_git(["commit", "-m", "watch change"], self.temp_dir)
+
+        state.current["status"] = STATUS_COMMITTED
+        save_goal_state(state)
+
+        ok, error = process_current_goal(
+            state, claude_runner=make_runner(), commit_runner=noop_commit_runner
+        )
+
+        assert ok is False
+        assert "merge" in error.lower()
+        assert state.current["status"] == STATUS_COMMITTED
+        # The failed merge was aborted - no merge in progress.
+        assert not (Path(self.temp_dir) / ".git" / "MERGE_HEAD").exists()
+
+    def test_resumes_from_ran_status(self, monkeypatch):
+        """Crash after Claude finished: goal file still present, work uncommitted."""
+        monkeypatch.chdir(self.temp_dir)
+        goal = self.add_goal("GOAL-resume.md")
+        state = self.new_state()
+        enqueue_new_goals(state)
+        claim_next_goal(state)
+
+        ok, error = _step_create_branch(state)
+        assert ok, error
+        Path("resumed.txt").write_text("work done before crash\n")
+        state.current["status"] = STATUS_RAN
+        save_goal_state(state)
+
+        claude_runner = make_runner()
+        ok, error = process_current_goal(
+            state, claude_runner=claude_runner, commit_runner=noop_commit_runner
+        )
+
+        assert ok, error
+        # Claude is not re-run when the run step already completed.
+        assert claude_runner.calls == []
+        assert not goal.exists()
+        assert (Path(self.temp_dir) / "resumed.txt").exists()
+        assert run_git(["rev-parse", "--abbrev-ref", "HEAD"], self.temp_dir) == "work"
+        assert state.current is None
+
+    def test_resumes_from_merged_status(self, monkeypatch):
+        """Crash after merge: only branch deletion and bookkeeping remain."""
+        monkeypatch.chdir(self.temp_dir)
+        self.add_goal("GOAL-finish.md")
+        state = self.new_state()
+        enqueue_new_goals(state)
+        claim_next_goal(state)
+
+        ok, error = _step_create_branch(state)
+        assert ok, error
+        run_git(["checkout", "work"], self.temp_dir)
+        (Path(self.temp_dir) / "goals" / "GOAL-finish.md").unlink()
+        state.current["status"] = STATUS_MERGED
+        save_goal_state(state)
+
+        ok, error = process_current_goal(
+            state, claude_runner=make_runner(), commit_runner=noop_commit_runner
+        )
+
+        assert ok, error
+        assert run_git(["branch", "--list", "goal-finish"], self.temp_dir) == ""
+        assert state.current is None
+        assert [c["goal_file"] for c in state.completed] == ["GOAL-finish.md"]
+
+    def test_finish_refuses_to_delete_unmerged_goal_branch_work(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        self.add_goal("GOAL-finish.md")
+        state = self.new_state()
+        enqueue_new_goals(state)
+        claim_next_goal(state)
+        ok, error = _step_create_branch(state)
+        assert ok, error
+
+        Path("merged.txt").write_text("merged work\n")
+        run_git(["add", "merged.txt"], self.temp_dir)
+        run_git(["commit", "-m", "goal merged work"], self.temp_dir)
+        run_git(["checkout", "work"], self.temp_dir)
+        run_git(["merge", "--no-ff", "-m", "merge goal", "goal-finish"], self.temp_dir)
+        run_git(["checkout", "goal-finish"], self.temp_dir)
+        Path("unmerged.txt").write_text("new work after merge\n")
+        run_git(["add", "unmerged.txt"], self.temp_dir)
+        run_git(["commit", "-m", "unmerged goal work"], self.temp_dir)
+        run_git(["checkout", "work"], self.temp_dir)
+
+        state.current["status"] = STATUS_MERGED
+        save_goal_state(state)
+
+        ok, error = process_current_goal(
+            state, claude_runner=make_runner(), commit_runner=noop_commit_runner
+        )
+
+        assert ok is False
+        assert "not fully merged" in error
+        assert run_git(["branch", "--list", "goal-finish"], self.temp_dir) != ""
+        assert state.current["status"] == STATUS_MERGED
+
+    def test_merge_refuses_recreated_goal_branch_without_watcher_marker(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        self.add_goal("GOAL-hijack.md")
+        state = self.new_state()
+        enqueue_new_goals(state)
+        claim_next_goal(state)
+        ok, error = _step_create_branch(state)
+        assert ok, error
+
+        run_git(["checkout", "work"], self.temp_dir)
+        run_git(["branch", "-D", "goal-hijack"], self.temp_dir)
+        run_git(["checkout", "-b", "goal-hijack", "work"], self.temp_dir)
+        Path("hijack.txt").write_text("foreign branch work\n")
+        run_git(["add", "hijack.txt"], self.temp_dir)
+        run_git(["commit", "-m", "foreign work"], self.temp_dir)
+        run_git(["checkout", "work"], self.temp_dir)
+
+        state.current["status"] = STATUS_COMMITTED
+        save_goal_state(state)
+
+        ok, error = process_current_goal(
+            state, claude_runner=make_runner(), commit_runner=noop_commit_runner
+        )
+
+        assert ok is False
+        assert "watcher ownership" in error
+        assert state.current["status"] == STATUS_COMMITTED
+        assert not Path("hijack.txt").exists()
+
+    def test_merge_refuses_bad_ownership_before_checkout(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        self.add_goal("GOAL-hijack.md")
+        state = self.new_state()
+        enqueue_new_goals(state)
+        claim_next_goal(state)
+        ok, error = _step_create_branch(state)
+        assert ok, error
+
+        run_git(["checkout", "work"], self.temp_dir)
+        run_git(["branch", "-D", "goal-hijack"], self.temp_dir)
+        run_git(["checkout", "-b", "goal-hijack", "work"], self.temp_dir)
+        Path("hijack.txt").write_text("foreign branch work\n")
+        run_git(["add", "hijack.txt"], self.temp_dir)
+        run_git(["commit", "-m", "foreign work"], self.temp_dir)
+
+        state.current["status"] = STATUS_COMMITTED
+        save_goal_state(state)
+
+        ok, error = process_current_goal(
+            state, claude_runner=make_runner(), commit_runner=noop_commit_runner
+        )
+
+        assert ok is False
+        assert "watcher ownership" in error
+        assert run_git(["rev-parse", "--abbrev-ref", "HEAD"], self.temp_dir) == "goal-hijack"
+        assert state.current["status"] == STATUS_COMMITTED
+
+    def test_finish_refuses_bad_ownership_before_checkout(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        self.add_goal("GOAL-finish.md")
+        state = self.new_state()
+        enqueue_new_goals(state)
+        claim_next_goal(state)
+        ok, error = _step_create_branch(state)
+        assert ok, error
+
+        run_git(["checkout", "work"], self.temp_dir)
+        run_git(["branch", "-D", "goal-finish"], self.temp_dir)
+        run_git(["checkout", "-b", "goal-finish", "work"], self.temp_dir)
+        Path("hijack.txt").write_text("foreign branch work\n")
+        run_git(["add", "hijack.txt"], self.temp_dir)
+        run_git(["commit", "-m", "foreign work"], self.temp_dir)
+
+        state.current["status"] = STATUS_MERGED
+        save_goal_state(state)
+
+        ok, error = process_current_goal(
+            state, claude_runner=make_runner(), commit_runner=noop_commit_runner
+        )
+
+        assert ok is False
+        assert "watcher ownership" in error
+        assert run_git(["rev-parse", "--abbrev-ref", "HEAD"], self.temp_dir) == "goal-finish"
+        assert state.current["status"] == STATUS_MERGED
+
+    def test_commit_validation_survives_crash_after_unsafe_commit(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        self.add_goal("GOAL-add-feature-x.md")
+        self.add_goal("GOAL-later.md")
+        state = self.new_state()
+        enqueue_new_goals(state)
+        claim_next_goal(state)
+        ok, error = _step_create_branch(state)
+        assert ok, error
+        Path("feature.txt").write_text("done\n")
+        (Path("goals") / "GOAL-add-feature-x.md").unlink()
+        state.current["status"] = STATUS_GOAL_DELETED
+        save_goal_state(state)
+
+        def commit_everything(goals_dir):
+            run_git(["add", "-A"], self.temp_dir)
+            run_git(["commit", "-m", "bad: commit everything"], self.temp_dir)
+            return SessionResult(output="", session_id="s", success=True)
+
+        def crash_before_validation(state_to_validate, base_oid):
+            raise RuntimeError("crash before commit validation")
+
+        monkeypatch.setattr(
+            goals_module,
+            "_validate_commits_did_not_include_excluded_paths",
+            crash_before_validation,
+        )
+        with pytest.raises(RuntimeError, match="crash before commit validation"):
+            process_current_goal(
+                state,
+                claude_runner=make_runner(),
+                commit_runner=commit_everything,
+            )
+
+        monkeypatch.undo()
+        monkeypatch.chdir(self.temp_dir)
+        recovered = load_goal_state()
+        assert recovered.current["status"] == STATUS_GOAL_DELETED
+        assert recovered.current["commit_validation_base"]
+
+        ok, error = process_current_goal(
+            recovered, claude_runner=make_runner(), commit_runner=noop_commit_runner
+        )
+
+        assert ok is False
+        assert "excluded paths" in error
+        run_git(["checkout", "work"], self.temp_dir)
+        tracked = run_git(["ls-files"], self.temp_dir).splitlines()
+        assert "feature.txt" not in tracked
+        assert not any(p.startswith("goals/") for p in tracked)
+        assert not any(p.startswith(".dvx/") for p in tracked)
+
+    def test_commit_validation_rejects_excluded_paths_hidden_by_later_commit(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        self.add_goal("GOAL-add-feature-x.md")
+        self.add_goal("GOAL-later.md")
+        state = self.new_state()
+        enqueue_new_goals(state)
+        claim_next_goal(state)
+
+        claude_runner = make_runner(
+            side_effect=lambda content: Path("feature.txt").write_text("done\n")
+        )
+
+        def commit_then_remove_excluded(goals_dir):
+            run_git(["add", "-A"], self.temp_dir)
+            run_git(["commit", "-m", "bad: include excluded"], self.temp_dir)
+            run_git(["rm", "--cached", "goals/GOAL-later.md", ".dvx/.gitignore"], self.temp_dir)
+            run_git(["commit", "-m", "remove excluded from final tree"], self.temp_dir)
+            return SessionResult(output="", session_id="s", success=True)
+
+        ok, error = process_current_goal(
+            state, claude_runner=claude_runner, commit_runner=commit_then_remove_excluded
+        )
+
+        assert ok is False
+        assert "excluded paths" in error
+        assert state.current["status"] == STATUS_GOAL_DELETED
+
+    def test_later_queued_goal_edit_after_current_claim_is_preserved(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        second = self.add_goal("GOAL-second.md", "Second original.\n")
+        self.add_goal("GOAL-first.md", "First goal.\n")
+        import os
+
+        os.utime(Path("goals") / "GOAL-first.md", (1, 1))
+        os.utime(second, (2, 2))
+        state = self.new_state()
+        enqueue_new_goals(state)
+        claim_next_goal(state)
+        second.write_text("Second edited before runner.\n")
+
+        ok, error = process_current_goal(
+            state, claude_runner=make_runner(), commit_runner=noop_commit_runner
+        )
+
+        assert ok, error
+        assert second.read_text() == "Second edited before runner.\n"
+
+    def test_later_queued_goal_delete_after_current_claim_is_preserved(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        second = self.add_goal("GOAL-second.md", "Second original.\n")
+        self.add_goal("GOAL-first.md", "First goal.\n")
+        import os
+
+        os.utime(Path("goals") / "GOAL-first.md", (1, 1))
+        os.utime(second, (2, 2))
+        state = self.new_state()
+        enqueue_new_goals(state)
+        claim_next_goal(state)
+        second.unlink()
+
+        ok, error = process_current_goal(
+            state, claude_runner=make_runner(), commit_runner=noop_commit_runner
+        )
+
+        assert ok, error
+        assert not second.exists()
+
+
+class TestRunGoalWatch(GitRepoTestCase):
+    def test_once_with_empty_dir_returns_immediately(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        shutil.rmtree(Path("goals"))
+
+        rc = run_goal_watch("work", goals_dir="./goals", once=True)
+
+        assert rc == 0
+        assert Path("goals").exists()
+
+    def test_processes_all_pending_goals_in_order(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        self.add_goal("GOAL-first.md", "First goal.\n")
+        self.add_goal("GOAL-second.md", "Second goal.\n")
+        # Make arrival order deterministic.
+        import os
+
+        os.utime(Path("goals") / "GOAL-first.md", (1, 1))
+        os.utime(Path("goals") / "GOAL-second.md", (2, 2))
+
+        order = []
+
+        def implement(content):
+            order.append(content.strip())
+            Path(f"out-{len(order)}.txt").write_text(content)
+
+        rc = run_goal_watch(
+            "work",
+            goals_dir="./goals",
+            once=True,
+            claude_runner=make_runner(side_effect=implement),
+            commit_runner=noop_commit_runner,
+        )
+
+        assert rc == 0
+        assert order == ["First goal.", "Second goal."]
+        state = load_goal_state()
+        assert state.current is None
+        assert state.queue == []
+        assert [c["goal_file"] for c in state.completed] == ["GOAL-first.md", "GOAL-second.md"]
+        assert scan_goal_files(Path("goals")) == []
+        assert run_git(["rev-parse", "--abbrev-ref", "HEAD"], self.temp_dir) == "work"
+
+    def test_queued_goal_content_change_during_runner_blocks_without_overwrite(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        self.add_goal("GOAL-first.md", "First goal.\n")
+        self.add_goal("GOAL-second.md", "Second goal original.\n")
+        import os
+
+        os.utime(Path("goals") / "GOAL-first.md", (1, 1))
+        os.utime(Path("goals") / "GOAL-second.md", (2, 2))
+        seen = []
+
+        def implement(content):
+            seen.append(content.strip())
+            if len(seen) == 1:
+                (Path("goals") / "GOAL-second.md").write_text("Corrupted by first goal.\n")
+            Path(f"out-{len(seen)}.txt").write_text(content)
+
+        rc = run_goal_watch(
+            "work",
+            goals_dir="./goals",
+            once=True,
+            claude_runner=make_runner(side_effect=implement),
+            commit_runner=noop_commit_runner,
+        )
+
+        assert rc == 1
+        assert seen == ["First goal."]
+        assert (Path("goals") / "GOAL-second.md").read_text() == "Corrupted by first goal.\n"
+        assert queued_goal_snapshot_file("GOAL-second.md").read_text() == "Second goal original.\n"
+        state = load_goal_state()
+        assert state.current["goal_file"] == "GOAL-first.md"
+        assert state.current["status"] == STATUS_BRANCHED
+        assert state.queue == ["GOAL-second.md"]
+
+    def test_queued_goal_delete_during_runner_blocks_without_recreate(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        self.add_goal("GOAL-first.md", "First goal.\n")
+        self.add_goal("GOAL-second.md", "Second goal original.\n")
+        import os
+
+        os.utime(Path("goals") / "GOAL-first.md", (1, 1))
+        os.utime(Path("goals") / "GOAL-second.md", (2, 2))
+        seen = []
+
+        def implement(content):
+            seen.append(content.strip())
+            if len(seen) == 1:
+                (Path("goals") / "GOAL-second.md").unlink()
+            Path(f"out-{len(seen)}.txt").write_text(content)
+
+        rc = run_goal_watch(
+            "work",
+            goals_dir="./goals",
+            once=True,
+            claude_runner=make_runner(side_effect=implement),
+            commit_runner=noop_commit_runner,
+        )
+
+        assert rc == 1
+        assert seen == ["First goal."]
+        assert not (Path("goals") / "GOAL-second.md").exists()
+        assert queued_goal_snapshot_file("GOAL-second.md").read_text() == "Second goal original.\n"
+        state = load_goal_state()
+        assert state.current["goal_file"] == "GOAL-first.md"
+        assert state.current["status"] == STATUS_BRANCHED
+        assert state.queue == ["GOAL-second.md"]
+
+    def test_active_snapshot_blocks_retry_after_crash_before_restore(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        self.add_goal("GOAL-first.md", "First goal.\n")
+        self.add_goal("GOAL-second.md", "Second goal original.\n")
+        import os
+
+        os.utime(Path("goals") / "GOAL-first.md", (1, 1))
+        os.utime(Path("goals") / "GOAL-second.md", (2, 2))
+        state = self.new_state()
+        enqueue_new_goals(state)
+        claim_next_goal(state)
+        ok, error = _step_create_branch(state)
+        assert ok, error
+        state.current["status"] = STATUS_BRANCHED
+        save_goal_state(state)
+
+        ok, error = goals_module._begin_queued_goal_guard(state)
+        assert ok, error
+        (Path("goals") / "GOAL-second.md").write_text("Corrupted before crash.\n")
+
+        runner = make_runner()
+        recovered = load_goal_state()
+        ok, error = process_current_goal(
+            recovered, claude_runner=runner, commit_runner=noop_commit_runner
+        )
+
+        assert ok is False
+        assert "Queued goals changed" in error
+        assert runner.calls == []
+        assert (Path("goals") / "GOAL-second.md").read_text() == "Corrupted before crash.\n"
+        assert queued_goal_snapshot_file("GOAL-second.md").read_text() == "Second goal original.\n"
+
+    def test_runner_cannot_hide_queued_goal_change_by_deleting_manifest(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        self.add_goal("GOAL-first.md", "First goal.\n")
+        self.add_goal("GOAL-second.md", "Second goal original.\n")
+        import os
+
+        os.utime(Path("goals") / "GOAL-first.md", (1, 1))
+        os.utime(Path("goals") / "GOAL-second.md", (2, 2))
+        seen = []
+
+        def implement(content):
+            seen.append(content.strip())
+            if len(seen) == 1:
+                (Path("goals") / "GOAL-second.md").write_text("Corrupted after manifest delete.\n")
+                queued_goal_snapshot_manifest_file().unlink()
+            Path(f"out-{len(seen)}.txt").write_text(content)
+
+        rc = run_goal_watch(
+            "work",
+            goals_dir="./goals",
+            once=True,
+            claude_runner=make_runner(side_effect=implement),
+            commit_runner=noop_commit_runner,
+        )
+
+        assert rc == 1
+        assert seen == ["First goal."]
+        assert (Path("goals") / "GOAL-second.md").read_text() == "Corrupted after manifest delete.\n"
+        assert queued_goal_snapshot_file("GOAL-second.md").read_text() == "Second goal original.\n"
+        state = load_goal_state()
+        assert state.current["queued_goal_guard"]
+        assert state.current["status"] == STATUS_BRANCHED
+
+    def test_runner_cannot_hide_queued_goal_change_by_tampering_snapshot(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        self.add_goal("GOAL-first.md", "First goal.\n")
+        self.add_goal("GOAL-second.md", "Second goal original.\n")
+        import os
+
+        os.utime(Path("goals") / "GOAL-first.md", (1, 1))
+        os.utime(Path("goals") / "GOAL-second.md", (2, 2))
+        seen = []
+
+        def implement(content):
+            seen.append(content.strip())
+            if len(seen) == 1:
+                corrupted = "Corrupted after snapshot tamper.\n"
+                (Path("goals") / "GOAL-second.md").write_text(corrupted)
+                queued_goal_snapshot_file("GOAL-second.md").write_text(corrupted)
+            Path(f"out-{len(seen)}.txt").write_text(content)
+
+        rc = run_goal_watch(
+            "work",
+            goals_dir="./goals",
+            once=True,
+            claude_runner=make_runner(side_effect=implement),
+            commit_runner=noop_commit_runner,
+        )
+
+        assert rc == 1
+        assert seen == ["First goal."]
+        assert (Path("goals") / "GOAL-second.md").read_text() == "Corrupted after snapshot tamper.\n"
+        assert queued_goal_snapshot_file("GOAL-second.md").read_text() == (
+            "Corrupted after snapshot tamper.\n"
+        )
+        state = load_goal_state()
+        assert state.current["queued_goal_guard"]
+        assert state.current["status"] == STATUS_BRANCHED
+
+    def test_runner_cannot_persist_tampered_guard_for_retry(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        self.add_goal("GOAL-first.md", "First goal.\n")
+        self.add_goal("GOAL-second.md", "Second goal original.\n")
+        import os
+
+        os.utime(Path("goals") / "GOAL-first.md", (1, 1))
+        os.utime(Path("goals") / "GOAL-second.md", (2, 2))
+        corrupted = "Corrupted everywhere.\n"
+        corrupt_entry = {
+            "goal_file": "GOAL-second.md",
+            "existed": True,
+            "sha256": goals_module._content_sha256(corrupted),
+        }
+        seen = []
+
+        def implement(content):
+            seen.append(content.strip())
+            if len(seen) == 1:
+                (Path("goals") / "GOAL-second.md").write_text(corrupted)
+                queued_goal_snapshot_file("GOAL-second.md").write_text(corrupted)
+                queued_goal_snapshot_manifest_file().write_text(
+                    json.dumps({"goals": [corrupt_entry]}, indent=2)
+                )
+                disk_state = json.loads(goals_state_file().read_text())
+                disk_state["current"]["queued_goal_guard"]["goals"] = [corrupt_entry]
+                goals_state_file().write_text(json.dumps(disk_state, indent=2))
+            Path(f"out-{len(seen)}.txt").write_text(content)
+
+        rc = run_goal_watch(
+            "work",
+            goals_dir="./goals",
+            once=True,
+            claude_runner=make_runner(side_effect=implement),
+            commit_runner=noop_commit_runner,
+        )
+
+        assert rc == 1
+        assert seen == ["First goal."]
+        recovered = load_goal_state()
+        persisted_guard = recovered.current["queued_goal_guard"]["goals"]
+        assert persisted_guard != [corrupt_entry]
+        assert persisted_guard[0]["sha256"] == goals_module._content_sha256("Second goal original.\n")
+
+        runner = make_runner()
+        ok, error = process_current_goal(
+            recovered, claude_runner=runner, commit_runner=noop_commit_runner
+        )
+
+        assert ok is False
+        assert "manifest changed" in error
+        assert runner.calls == []
+        assert (Path("goals") / "GOAL-second.md").read_text() == corrupted
+
+    def test_missing_manifest_active_guard_blocks_retry(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        self.add_goal("GOAL-first.md", "First goal.\n")
+        self.add_goal("GOAL-second.md", "Second goal original.\n")
+        import os
+
+        os.utime(Path("goals") / "GOAL-first.md", (1, 1))
+        os.utime(Path("goals") / "GOAL-second.md", (2, 2))
+        state = self.new_state()
+        enqueue_new_goals(state)
+        claim_next_goal(state)
+        ok, error = _step_create_branch(state)
+        assert ok, error
+        state.current["status"] = STATUS_BRANCHED
+        save_goal_state(state)
+
+        ok, error = goals_module._begin_queued_goal_guard(state)
+        assert ok, error
+        queued_goal_snapshot_manifest_file().unlink()
+        (Path("goals") / "GOAL-second.md").write_text("Corrupted after manifest delete.\n")
+
+        runner = make_runner()
+        recovered = load_goal_state()
+        ok, error = process_current_goal(
+            recovered, claude_runner=runner, commit_runner=noop_commit_runner
+        )
+
+        assert ok is False
+        assert "manifest is missing" in error
+        assert runner.calls == []
+        assert (Path("goals") / "GOAL-second.md").read_text() == "Corrupted after manifest delete.\n"
+        assert queued_goal_snapshot_file("GOAL-second.md").read_text() == "Second goal original.\n"
+
+    def test_queued_goal_content_change_during_commit_runner_blocks(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        self.add_goal("GOAL-first.md", "First goal.\n")
+        self.add_goal("GOAL-second.md", "Second goal original.\n")
+        import os
+
+        os.utime(Path("goals") / "GOAL-first.md", (1, 1))
+        os.utime(Path("goals") / "GOAL-second.md", (2, 2))
+        seen = []
+
+        def implement(content):
+            seen.append(content.strip())
+            Path(f"out-{len(seen)}.txt").write_text(content)
+
+        commit_calls = []
+
+        def commit_and_corrupt(goals_dir):
+            commit_calls.append(goals_dir)
+            run_git(["add", f"out-{len(commit_calls)}.txt"], self.temp_dir)
+            run_git(["commit", "-m", f"goal output {len(commit_calls)}"], self.temp_dir)
+            if len(commit_calls) == 1:
+                (Path("goals") / "GOAL-second.md").write_text("Corrupted by commit runner.\n")
+            return SessionResult(output="", session_id="s", success=True)
+
+        rc = run_goal_watch(
+            "work",
+            goals_dir="./goals",
+            once=True,
+            claude_runner=make_runner(side_effect=implement),
+            commit_runner=commit_and_corrupt,
+        )
+
+        assert rc == 1
+        assert seen == ["First goal."]
+        assert (Path("goals") / "GOAL-second.md").read_text() == "Corrupted by commit runner.\n"
+        assert queued_goal_snapshot_file("GOAL-second.md").read_text() == "Second goal original.\n"
+        state = load_goal_state()
+        assert state.current["goal_file"] == "GOAL-first.md"
+        assert state.current["status"] == STATUS_GOAL_DELETED
+        assert state.queue == ["GOAL-second.md"]
+
+    def test_commit_retry_keeps_blocking_after_queued_goal_conflict(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        self.add_goal("GOAL-first.md", "First goal.\n")
+        self.add_goal("GOAL-second.md", "Second goal original.\n")
+        import os
+
+        os.utime(Path("goals") / "GOAL-first.md", (1, 1))
+        os.utime(Path("goals") / "GOAL-second.md", (2, 2))
+
+        def implement(content):
+            Path("out-1.txt").write_text(content)
+
+        def commit_and_corrupt(goals_dir):
+            run_git(["add", "out-1.txt"], self.temp_dir)
+            run_git(["commit", "-m", "goal output"], self.temp_dir)
+            (Path("goals") / "GOAL-second.md").write_text("Corrupted by commit runner.\n")
+            return SessionResult(output="", session_id="s", success=True)
+
+        rc = run_goal_watch(
+            "work",
+            goals_dir="./goals",
+            once=True,
+            claude_runner=make_runner(side_effect=implement),
+            commit_runner=commit_and_corrupt,
+        )
+        assert rc == 1
+
+        recovered = load_goal_state()
+        ok, error = process_current_goal(
+            recovered,
+            claude_runner=make_runner(),
+            commit_runner=noop_commit_runner,
+        )
+
+        assert ok is False
+        assert "Queued goals changed" in error
+        assert recovered.current["status"] == STATUS_GOAL_DELETED
+        assert run_git(["rev-parse", "--abbrev-ref", "HEAD"], self.temp_dir) == "goal-first"
+        assert (Path("goals") / "GOAL-second.md").read_text() == "Corrupted by commit runner.\n"
+        assert queued_goal_snapshot_file("GOAL-second.md").read_text() == "Second goal original.\n"
+
+    def test_once_blocks_dirty_tree_without_running_goal(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        Path("local.txt").write_text("user work before watcher\n")
+        self.add_goal("GOAL-noop.md")
+
+        rc = run_goal_watch(
+            "work",
+            goals_dir="./goals",
+            once=True,
+            claude_runner=fail_goal_runner,
+            commit_runner=fail_commit_runner,
+        )
+
+        assert rc == 1
+        state = load_goal_state()
+        assert state.current is None
+        assert state.queue == ["GOAL-noop.md"]
+        assert state.blocked["dirty_paths"] == ["local.txt"]
+        assert (Path(self.temp_dir) / "goals" / "GOAL-noop.md").exists()
+        assert Path("local.txt").read_text() == "user work before watcher\n"
+
+    def test_once_blocks_tracked_rename_into_goals_without_running_goal(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        Path("tracked.txt").write_text("tracked user work\n")
+        run_git(["add", "tracked.txt"], self.temp_dir)
+        run_git(["commit", "-m", "add tracked"], self.temp_dir)
+        run_git(["mv", "tracked.txt", "goals/tracked.txt"], self.temp_dir)
+        self.add_goal("GOAL-noop.md")
+
+        rc = run_goal_watch(
+            "work",
+            goals_dir="./goals",
+            once=True,
+            claude_runner=fail_goal_runner,
+            commit_runner=fail_commit_runner,
+        )
+
+        assert rc == 1
+        state = load_goal_state()
+        assert state.current is None
+        assert state.queue == ["GOAL-noop.md"]
+        assert state.blocked["dirty_paths"] == ["tracked.txt"]
+        assert (Path(self.temp_dir) / "goals" / "GOAL-noop.md").exists()
+        assert (Path(self.temp_dir) / "goals" / "tracked.txt").read_text() == "tracked user work\n"
+
+    def test_once_blocks_dirty_path_that_only_strips_to_goals_prefix(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        Path(" goals").mkdir()
+        Path(" goals/user.txt").write_text("user work before watcher\n")
+        self.add_goal("GOAL-noop.md")
+
+        rc = run_goal_watch(
+            "work",
+            goals_dir="./goals",
+            once=True,
+            claude_runner=fail_goal_runner,
+            commit_runner=fail_commit_runner,
+        )
+
+        assert rc == 1
+        state = load_goal_state()
+        assert state.current is None
+        assert state.queue == ["GOAL-noop.md"]
+        assert state.blocked["dirty_paths"] == [" goals/"]
+        assert Path(" goals/user.txt").read_text() == "user work before watcher\n"
+
+    def test_once_retries_blocked_goal_after_dirty_tree_cleanup(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        dirty = Path("local.txt")
+        dirty.write_text("user work before watcher\n")
+        self.add_goal("GOAL-noop.md", "Noop goal.\n")
+
+        rc = run_goal_watch(
+            "work",
+            goals_dir="./goals",
+            once=True,
+            claude_runner=fail_goal_runner,
+            commit_runner=fail_commit_runner,
+        )
+        assert rc == 1
+
+        dirty.unlink()
+        rc = run_goal_watch(
+            "work",
+            goals_dir="./goals",
+            once=True,
+            claude_runner=make_runner(),
+            commit_runner=noop_commit_runner,
+        )
+
+        assert rc == 0
+        state = load_goal_state()
+        assert state.current is None
+        assert state.queue == []
+        assert state.blocked is None
+        assert [c["goal_file"] for c in state.completed] == ["GOAL-noop.md"]
+
+    def test_continuous_watch_does_not_relog_unchanged_blocked_goal(
+        self,
+        monkeypatch,
+        capsys,
+    ):
+        monkeypatch.chdir(self.temp_dir)
+        dirty = Path("local.txt")
+        dirty.write_text("user work before watcher\n")
+        self.add_goal("GOAL-noop.md", "Noop goal.\n")
+        sleeps = []
+
+        def sleep_once_then_clean(interval):
+            sleeps.append(interval)
+            if len(sleeps) == 2:
+                dirty.unlink()
+            if len(sleeps) == 3:
+                raise RuntimeError("stop watch loop")
+
+        monkeypatch.setattr(goals_module.time, "sleep", sleep_once_then_clean)
+
+        with pytest.raises(RuntimeError, match="stop watch loop"):
+            run_goal_watch(
+                "work",
+                goals_dir="./goals",
+                poll_interval=0.01,
+                once=False,
+                claude_runner=make_runner(),
+                commit_runner=noop_commit_runner,
+            )
+
+        out = capsys.readouterr().out
+        assert out.count("Blocked goal GOAL-noop.md") == 1
+        state = load_goal_state()
+        assert state.blocked is None
+        assert [c["goal_file"] for c in state.completed] == ["GOAL-noop.md"]
+
+    def test_blocked_dirty_path_comparison_is_order_insensitive(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        state = self.new_state()
+        state.blocked = {
+            "goal_file": "GOAL-noop.md",
+            "reason": "working tree is dirty outside goals and .dvx",
+            "dirty_paths": ["b.txt", "a.txt"],
+        }
+        monkeypatch.setattr(goals_module, "_dirty_paths", lambda goals_dir: ["a.txt", "b.txt"])
+
+        changed, error = goals_module._blocked_dirty_paths_changed(state)
+
+        assert error == ""
+        assert changed is False
+
+    def test_recovers_after_failure(self, monkeypatch):
+        """A failed run leaves state behind; the next run finishes the goal."""
+        monkeypatch.chdir(self.temp_dir)
+        self.add_goal("GOAL-flaky.md", "Flaky goal.\n")
+
+        rc = run_goal_watch(
+            "work",
+            goals_dir="./goals",
+            once=True,
+            claude_runner=make_runner(success=False),
+            commit_runner=noop_commit_runner,
+        )
+        assert rc == 1
+        assert load_goal_state().current["status"] == STATUS_BRANCHED
+
+        rc = run_goal_watch(
+            "work",
+            goals_dir="./goals",
+            once=True,
+            claude_runner=make_runner(),
+            commit_runner=noop_commit_runner,
+        )
+        assert rc == 0
+        state = load_goal_state()
+        assert state.current is None
+        assert [c["goal_file"] for c in state.completed] == ["GOAL-flaky.md"]
+
+    def test_uses_saved_watch_branch_on_recovery(self, monkeypatch):
+        """The original watch branch wins even if watch restarts elsewhere."""
+        monkeypatch.chdir(self.temp_dir)
+        save_goal_state(GoalState(watch_branch="work", goals_dir="./goals"))
+        self.add_goal("GOAL-one.md")
+
+        rc = run_goal_watch(
+            "some-other-branch",
+            goals_dir="./goals",
+            once=True,
+            claude_runner=make_runner(),
+            commit_runner=noop_commit_runner,
+        )
+
+        assert rc == 0
+        assert load_goal_state().watch_branch == "work"
+        assert run_git(["rev-parse", "--abbrev-ref", "HEAD"], self.temp_dir) == "work"

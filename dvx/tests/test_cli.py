@@ -12,18 +12,15 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from cli import (
+    cmd_clear,
     cmd_watch,
-    commit_watch_completion,
     find_continuation_queue,
     get_continuation_queue_path,
     is_queue_file,
     load_queue,
-    move_completed_watch_plan,
-    resolve_dvx_command,
     save_queue,
-    validate_completed_watch_plan,
-    wait_for_new_todo_file,
 )
+from goals import GoalState, goals_state_file, load_goal_state, save_goal_state
 from state import get_dvx_dir
 
 
@@ -288,7 +285,7 @@ class TestQueueWorkflow:
 
 
 class TestWatchCommand:
-    """Tests for single-shot watch mode."""
+    """Tests for the goal-based watch command."""
 
     def setup_method(self):
         """Create temp git repo for each test."""
@@ -301,223 +298,53 @@ class TestWatchCommand:
         readme.write_text("# test\n")
         run_git(["add", "README.md"], self.temp_dir)
         run_git(["commit", "-m", "init"], self.temp_dir)
+        run_git(["checkout", "-b", "work"], self.temp_dir)
 
     def teardown_method(self):
         """Clean up temp directory."""
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    def test_watch_creates_missing_dirs_runs_and_moves_plan_to_done(self, monkeypatch):
-        """Should create watch dirs, run synchronously, and move completed work to done."""
+    def test_watch_passes_current_branch_to_goal_loop(self, monkeypatch):
+        """Should note the branch watch was started on and hand it to the loop."""
         monkeypatch.chdir(self.temp_dir)
-        monkeypatch.setattr("cli.resolve_dvx_command", lambda: ["fake-dvx"])
+        calls = []
 
-        run_calls = []
-        commit_calls = []
+        def fake_run_goal_watch(start_branch, goals_dir, poll_interval, once):
+            calls.append((start_branch, goals_dir, poll_interval, once))
+            return 0
 
-        def fake_wait_for_new_todo_file(todo_dir):
-            todo_file = todo_dir / "PLAN-migrate-x-to-y.md"
-            todo_file.write_text("# plan\n")
-            return todo_file
+        monkeypatch.setattr("cli.run_goal_watch", fake_run_goal_watch)
 
-        def fake_run_watch_plan(plan_file):
-            run_calls.append(plan_file)
-            return 0, ""
-
-        def fake_commit_watch_completion(source, destination):
-            commit_calls.append((source, destination))
-            return True, False
-
-        monkeypatch.setattr("cli.wait_for_new_todo_file", fake_wait_for_new_todo_file)
-        monkeypatch.setattr("cli.run_watch_plan", fake_run_watch_plan)
-        monkeypatch.setattr("cli.validate_completed_watch_plan", lambda plan_file: (True, ""))
-        monkeypatch.setattr("cli.commit_watch_completion", fake_commit_watch_completion)
-
-        result = cmd_watch(SimpleNamespace(todo="./todo/", doing="./doing/", done="./done/"))
+        result = cmd_watch(SimpleNamespace(goals="./goals", poll_interval=2.0, once=True))
 
         assert result == 0
-        assert run_git(["rev-parse", "--abbrev-ref", "HEAD"], self.temp_dir) == "PLAN-migrate-x-to-y"
-        assert (Path(self.temp_dir) / "todo").exists()
-        assert (Path(self.temp_dir) / "doing").exists()
-        assert (Path(self.temp_dir) / "done").exists()
-        assert not (Path(self.temp_dir) / "todo" / "PLAN-migrate-x-to-y.md").exists()
-        assert not (Path(self.temp_dir) / "doing" / "PLAN-migrate-x-to-y.md").exists()
-        assert (Path(self.temp_dir) / "done" / "PLAN-migrate-x-to-y.md").exists()
+        assert calls == [("work", "./goals", 2.0, True)]
 
-        assert run_calls == [Path("doing/PLAN-migrate-x-to-y.md")]
-        assert commit_calls == [
-            (Path("doing/PLAN-migrate-x-to-y.md"), Path("done/PLAN-migrate-x-to-y.md"))
-        ]
+    def test_watch_fails_outside_git_repo(self, monkeypatch, tmp_path):
+        """Should refuse to watch when not in a git repository."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent))
 
-    def test_watch_fails_when_branch_already_exists(self, monkeypatch):
-        """Should fail without moving the plan when the target branch already exists."""
-        todo_dir = Path(self.temp_dir) / "todo"
-        todo_dir.mkdir()
-        todo_file = todo_dir / "PLAN-migrate-x-to-y.md"
-        todo_file.write_text("# plan\n")
-
-        run_git(["checkout", "-b", "PLAN-migrate-x-to-y"], self.temp_dir)
-        run_git(["checkout", "main"], self.temp_dir)
-
-        monkeypatch.chdir(self.temp_dir)
-        monkeypatch.setattr("cli.wait_for_new_todo_file", lambda todo_dir: Path("todo/PLAN-migrate-x-to-y.md"))
-
-        result = cmd_watch(SimpleNamespace(todo="./todo/", doing="./doing/", done="./done/"))
+        result = cmd_watch(SimpleNamespace(goals="./goals", poll_interval=2.0, once=True))
 
         assert result == 1
-        assert run_git(["rev-parse", "--abbrev-ref", "HEAD"], self.temp_dir) == "main"
-        assert todo_file.exists()
-        assert not (Path(self.temp_dir) / "doing" / "PLAN-migrate-x-to-y.md").exists()
 
-    def test_watch_leaves_plan_in_doing_when_plan_is_not_marked_done(self, monkeypatch):
-        """Should leave the plan in doing when dvx run exits cleanly but the plan is incomplete."""
-        todo_dir = Path(self.temp_dir) / "todo"
-        todo_dir.mkdir()
-        todo_file = todo_dir / "PLAN-migrate-x-to-y.md"
-        todo_file.write_text("# plan\n")
-
-        monkeypatch.chdir(self.temp_dir)
-        monkeypatch.setattr("cli.wait_for_new_todo_file", lambda todo_dir: Path("todo/PLAN-migrate-x-to-y.md"))
-        monkeypatch.setattr("cli.run_watch_plan", lambda plan_file: (0, ""))
-        monkeypatch.setattr(
-            "cli.validate_completed_watch_plan",
-            lambda plan_file: (False, "Watched plan is not fully done."),
-        )
-        monkeypatch.setattr(
-            "cli.commit_watch_completion",
-            lambda source, destination: pytest.fail("watch should not commit incomplete plans"),
-        )
-
-        result = cmd_watch(SimpleNamespace(todo="./todo/", doing="./doing/", done="./done/"))
-
-        assert result == 1
-        assert run_git(["rev-parse", "--abbrev-ref", "HEAD"], self.temp_dir) == "PLAN-migrate-x-to-y"
-        assert not todo_file.exists()
-        assert (Path(self.temp_dir) / "doing" / "PLAN-migrate-x-to-y.md").exists()
-        assert not (Path(self.temp_dir) / "done" / "PLAN-migrate-x-to-y.md").exists()
-
-
-class TestWatchCompletion:
-    """Tests for watched plan completion helpers."""
-
-    def setup_method(self):
-        """Create temp git repo for each test."""
-        self.temp_dir = tempfile.mkdtemp()
-        run_git(["init", "-b", "main"], self.temp_dir)
-        run_git(["config", "user.name", "DVX Test"], self.temp_dir)
-        run_git(["config", "user.email", "dvx@example.com"], self.temp_dir)
-
-        readme = Path(self.temp_dir) / "README.md"
-        readme.write_text("# test\n")
-        run_git(["add", "README.md"], self.temp_dir)
-        run_git(["commit", "-m", "init"], self.temp_dir)
-
-    def teardown_method(self):
-        """Clean up temp directory."""
-        shutil.rmtree(self.temp_dir, ignore_errors=True)
-
-    def test_validate_completed_watch_plan_requires_all_tasks_done(self, monkeypatch):
-        """Should reject plans that still have incomplete tasks."""
-        monkeypatch.setattr(
-            "cli.get_plan_summary",
-            lambda plan_file: {
-                "total": 3,
-                "done": 2,
-                "pending": 1,
-                "in_progress": 0,
-                "blocked": 0,
-            },
-        )
-
-        ok, error = validate_completed_watch_plan(Path("doing/PLAN-migrate-x-to-y.md"))
-
-        assert ok is False
-        assert "not fully done" in error
-
-    def test_move_completed_watch_plan_moves_successful_plan(self, monkeypatch):
-        """Should move a completed plan from doing to done."""
+    def test_watch_returns_130_on_interrupt(self, monkeypatch):
+        """Should exit cleanly on Ctrl-C with recovery preserved."""
         monkeypatch.chdir(self.temp_dir)
 
-        plan_file = Path("doing/PLAN-migrate-x-to-y.md")
-        plan_file.parent.mkdir(parents=True)
-        plan_file.write_text("# plan\n")
+        def interrupted(*args, **kwargs):
+            raise KeyboardInterrupt
 
-        ok, destination = move_completed_watch_plan(plan_file, Path("done"))
+        monkeypatch.setattr("cli.run_goal_watch", interrupted)
 
-        assert ok is True
-        assert not plan_file.exists()
-        assert destination == Path("done/PLAN-migrate-x-to-y.md")
-        assert Path("done/PLAN-migrate-x-to-y.md").exists()
+        result = cmd_watch(SimpleNamespace(goals="./goals", poll_interval=2.0, once=False))
 
-    def test_commit_watch_completion_skips_ignored_done_paths(self, monkeypatch):
-        """Should not create a commit when the done path is git-ignored."""
-        monkeypatch.chdir(self.temp_dir)
-        Path(".gitignore").write_text("done/*\n")
-        run_git(["add", ".gitignore"], self.temp_dir)
-        run_git(["commit", "-m", "ignore done"], self.temp_dir)
-
-        destination = Path("done/PLAN-migrate-x-to-y.md")
-        destination.parent.mkdir(parents=True)
-        destination.write_text("# plan\n")
-
-        ok, committed = commit_watch_completion(Path("doing/PLAN-migrate-x-to-y.md"), destination)
-
-        assert ok is True
-        assert committed is False
-        assert run_git(["status", "--short"], self.temp_dir) == ""
-
-    def test_commit_watch_completion_commits_tracked_done_paths(self, monkeypatch):
-        """Should commit the completed plan move when done/ is tracked."""
-        monkeypatch.chdir(self.temp_dir)
-
-        source = Path("doing/PLAN-migrate-x-to-y.md")
-        source.parent.mkdir(parents=True)
-        source.write_text("# plan\n")
-        run_git(["add", str(source)], self.temp_dir)
-        run_git(["commit", "-m", "add queued plan"], self.temp_dir)
-
-        destination = Path("done/PLAN-migrate-x-to-y.md")
-        destination.parent.mkdir(parents=True)
-        source.rename(destination)
-
-        ok, committed = commit_watch_completion(source, destination)
-
-        assert ok is True
-        assert committed is True
-        assert run_git(["log", "-1", "--pretty=%s"], self.temp_dir) == "watch: move PLAN-migrate-x-to-y.md to done"
-        assert run_git(["status", "--short"], self.temp_dir) == ""
-
-    def test_commit_watch_completion_leaves_unrelated_staged_changes(self, monkeypatch):
-        """Should commit only the watched plan move and leave other staged changes alone."""
-        monkeypatch.chdir(self.temp_dir)
-
-        source = Path("doing/PLAN-migrate-x-to-y.md")
-        source.parent.mkdir(parents=True)
-        source.write_text("# plan\n")
-        run_git(["add", str(source)], self.temp_dir)
-        run_git(["commit", "-m", "add queued plan"], self.temp_dir)
-
-        destination = Path("done/PLAN-migrate-x-to-y.md")
-        destination.parent.mkdir(parents=True)
-        source.rename(destination)
-
-        unrelated = Path("notes.txt")
-        unrelated.write_text("staged elsewhere\n")
-        run_git(["add", str(unrelated)], self.temp_dir)
-
-        ok, committed = commit_watch_completion(source, destination)
-
-        assert ok is True
-        assert committed is True
-        assert run_git(["log", "-1", "--pretty=%s"], self.temp_dir) == "watch: move PLAN-migrate-x-to-y.md to done"
-        assert run_git(["status", "--short"], self.temp_dir) == "A  notes.txt"
-        assert sorted(run_git(["diff-tree", "--no-commit-id", "--name-status", "-r", "HEAD"], self.temp_dir).splitlines()) == [
-            "A\tdone/PLAN-migrate-x-to-y.md",
-            "D\tdoing/PLAN-migrate-x-to-y.md",
-        ]
+        assert result == 130
 
 
-class TestWatchDetection:
-    """Tests for selecting the next todo file."""
+class TestClearCommand:
+    """Tests for dvx clear."""
 
     def setup_method(self):
         """Create temp directory for each test."""
@@ -527,29 +354,28 @@ class TestWatchDetection:
         """Clean up temp directory."""
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    def test_wait_for_new_todo_file_returns_existing_file_first(self, monkeypatch):
-        """Should process an existing todo file immediately."""
+    def test_clear_removes_goal_state_but_keeps_goal_files(self, monkeypatch):
+        """Goal state goes away; ./goals/ is untouched so watch can re-pick them up."""
+        monkeypatch.chdir(self.temp_dir)
+        goals_dir = Path("goals")
+        goals_dir.mkdir()
+        goal = goals_dir / "GOAL-keep-me.md"
+        goal.write_text("# goal\n")
+        save_goal_state(
+            GoalState(watch_branch="work", goals_dir="./goals", queue=["GOAL-keep-me.md"])
+        )
+
+        result = cmd_clear(SimpleNamespace())
+
+        assert result == 0
+        assert load_goal_state() is None
+        assert not goals_state_file().parent.exists()
+        assert goal.exists()
+
+    def test_clear_with_no_state_succeeds(self, monkeypatch):
+        """Should be a no-op when there is nothing to clear."""
         monkeypatch.chdir(self.temp_dir)
 
-        todo_dir = Path("todo")
-        todo_dir.mkdir()
-        older = todo_dir / "PLAN-older.md"
-        older.write_text("# older\n")
+        result = cmd_clear(SimpleNamespace())
 
-        result = wait_for_new_todo_file(todo_dir)
-
-        assert result == older
-
-
-class TestResolveDvxCommand:
-    """Tests for re-invoking the CLI."""
-
-    def test_resolve_dvx_command_uses_python_for_non_executable_script(self, monkeypatch, tmp_path):
-        """Should prepend the interpreter when argv[0] points to a non-executable script."""
-        script = tmp_path / "cli.py"
-        script.write_text("#!/usr/bin/env python3\n")
-        script.chmod(0o644)
-
-        monkeypatch.setattr(sys, "argv", [str(script), "watch"])
-
-        assert resolve_dvx_command() == [sys.executable, str(script.resolve())]
+        assert result == 0
