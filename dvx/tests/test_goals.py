@@ -475,6 +475,63 @@ class TestProcessGoal(GitRepoTestCase):
         assert [c["goal_file"] for c in state.completed] == ["GOAL-add-feature-x.md"]
         assert load_goal_state().current is None
 
+    def test_merge_pushes_watch_branch_to_origin(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(self.temp_dir)
+        origin = tmp_path / "origin.git"
+        run_git(["init", "--bare", str(origin)], self.temp_dir)
+        run_git(["remote", "add", "origin", str(origin)], self.temp_dir)
+        self.add_goal("GOAL-add-feature-x.md")
+        state = self.new_state()
+        enqueue_new_goals(state)
+        claim_next_goal(state)
+
+        claude_runner = make_runner(
+            side_effect=lambda content: Path("feature.txt").write_text("done\n")
+        )
+
+        ok, error = process_current_goal(
+            state, claude_runner=claude_runner, commit_runner=noop_commit_runner
+        )
+
+        assert ok, error
+        # Remote reviewers see the merged goal work on the watch branch.
+        local_tip = run_git(["rev-parse", "work"], self.temp_dir)
+        remote_tip = run_git(["rev-parse", "work"], str(origin))
+        assert local_tip == remote_tip
+
+    def test_push_failure_preserves_state_and_retry_pushes(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(self.temp_dir)
+        origin = tmp_path / "origin.git"  # does not exist yet - push will fail
+        run_git(["remote", "add", "origin", str(origin)], self.temp_dir)
+        self.add_goal("GOAL-add-feature-x.md")
+        state = self.new_state()
+        enqueue_new_goals(state)
+        claim_next_goal(state)
+
+        claude_runner = make_runner(
+            side_effect=lambda content: Path("feature.txt").write_text("done\n")
+        )
+
+        ok, error = process_current_goal(
+            state, claude_runner=claude_runner, commit_runner=noop_commit_runner
+        )
+
+        assert ok is False
+        assert "push" in error
+        # The merge landed locally; the step stays uncompleted for retry.
+        assert state.current["status"] == STATUS_COMMITTED
+
+        # Once the remote exists, the retry re-merges (no-op) and pushes.
+        run_git(["init", "--bare", str(origin)], self.temp_dir)
+        ok, error = process_current_goal(
+            state, claude_runner=fail_goal_runner, commit_runner=fail_commit_runner
+        )
+        assert ok, error
+        assert state.current is None
+        local_tip = run_git(["rev-parse", "work"], self.temp_dir)
+        remote_tip = run_git(["rev-parse", "work"], str(origin))
+        assert local_tip == remote_tip
+
     def test_fallback_commit_excludes_goals_and_dvx_state(self, monkeypatch):
         monkeypatch.chdir(self.temp_dir)
         self.add_goal("GOAL-add-feature-x.md")

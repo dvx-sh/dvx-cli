@@ -26,7 +26,8 @@ What the implementer session is (write the goal for THIS audience):
 - The session runs at the repository root on a fresh branch (goal-<slug>) cut from
   the branch `dvx watch` was started on. After the session, the watcher deletes this
   goal file, commits any remaining changes in logical groups, merges the branch back
-  with --no-ff, and deletes it. Do not ask the implementer to push, open PRs, or merge.
+  with --no-ff, deletes it, and pushes the watch branch to its remote. Do not ask
+  the implementer to push, open PRs, or merge — the watcher owns integration.
 - The session has a 4-hour timeout. Scope the goal to comfortably fit; split larger
   work into multiple GOAL files (they run sequentially, each on its own branch).
 -->

@@ -4,7 +4,8 @@ Goal queue processing for `dvx watch`.
 Watches a goals directory (default .dvx/goals/) for GOAL-*.md files and
 processes them one at a time: each goal gets its own working branch, is
 handed to Claude Code (Fable 5) via the /goal command, and is merged back
-into the branch that was active when the watcher started.
+into the branch that was active when the watcher started, which is then
+pushed to its remote (when one exists) so remote reviewers see the work.
 
 The watched directory lives under .dvx/ so it is created by dvx itself and
 is already gitignored - other sessions can queue work simply by dropping
@@ -910,6 +911,29 @@ def _step_commit(
     return True, ""
 
 
+def _push_watch_branch(state: GoalState) -> tuple[bool, str]:
+    """
+    Push the watch branch so remote reviewers see merged goal work.
+
+    Repos without a remote (local-only use, tests) skip the push. A push
+    failure fails the step loudly: the merge step is safe to re-run (merging
+    an already-merged branch is a no-op), so a retry just pushes again.
+    """
+    result = _git(["remote"])
+    if result.returncode != 0:
+        return False, _git_error(result, "list remotes")
+    remotes = result.stdout.split()
+    if not remotes:
+        logger.info("No git remote configured; skipping push")
+        return True, ""
+    remote = "origin" if "origin" in remotes else remotes[0]
+    result = _git(["push", remote, state.watch_branch])
+    if result.returncode != 0:
+        return False, _git_error(result, f"push {state.watch_branch} to {remote}")
+    logger.info(f"Pushed {state.watch_branch} to {remote}")
+    return True, ""
+
+
 def _step_merge(state: GoalState) -> tuple[bool, str]:
     branch = state.current["branch"]
     if not branch_exists(branch):
@@ -926,7 +950,8 @@ def _step_merge(state: GoalState) -> tuple[bool, str]:
     if result.returncode != 0:
         _git(["merge", "--abort"])
         return False, _git_error(result, f"merge {branch} into {state.watch_branch}")
-    return True, ""
+
+    return _push_watch_branch(state)
 
 
 def _step_finish(state: GoalState, project_dir: Optional[str] = None) -> tuple[bool, str]:

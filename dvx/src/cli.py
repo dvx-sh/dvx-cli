@@ -879,9 +879,10 @@ def cmd_watch(args) -> int:
 
     Each goal is queued in .dvx/watch/state.json, worked on its own branch
     by Claude Code (Fable 5, /goal command), committed in logical groups,
-    merged back into the branch watch started on, and cleaned up. All state
-    transitions are persisted atomically so the watcher recovers from a
-    crash or kill at any point - just re-run `dvx watch`.
+    merged back into the branch watch started on (which is then pushed to
+    its remote, when one exists), and cleaned up. All state transitions are
+    persisted atomically so the watcher recovers from a crash or kill at
+    any point - just re-run `dvx watch`.
     """
     ok, branch_or_error = check_watch_git_environment()
     if not ok:

@@ -24,7 +24,7 @@ In a separate terminal, in your project directory:
 dvx watch
 ```
 
-It watches `.dvx/goals/` for `GOAL-*.md` files; each goal gets its own branch, a headless Claude session implements it, and changes are committed in logical groups and merged back. A killed watcher resumes where it left off (`dvx clear` resets watcher state). The watcher only claims goals when the working tree is clean — commit or stash first; blocked goals are reported along with the dirty paths.
+It watches `.dvx/goals/` for `GOAL-*.md` files; each goal gets its own branch, a headless Claude session implements it, and changes are committed in logical groups and merged back. A killed watcher resumes where it left off (`dvx clear` resets watcher state). The watcher only claims goals when the working tree is clean — commit or stash first; blocked goals are reported along with the dirty paths. Merges land on the branch the watcher was started on, which is then pushed to its remote (when one exists) — run the watcher on a dedicated branch and review the work there; nothing touches main unless you start the watcher on main. Each goal file specifies verification commands the implementer must pass before it can finish.
 
 ## Queue a goal
 
@@ -47,7 +47,7 @@ self-contained.
 
 ## Manual installation
 
-`install.sh` auto-detects how it's run: piped from curl it downloads the repo and installs; run from a local clone it installs from the checkout.
+`install.sh` auto-detects how it's run: piped from curl it downloads the repo and installs; run from a local clone it installs from the checkout. (It sits at the repo root, so you can read exactly what the curl pipes to bash before running it.)
 
 ```bash
 git clone https://github.com/dvx-sh/dvx-cli.git
