@@ -23,6 +23,8 @@ cd dvx-cli
 ./install.sh           # add --dev to also install pytest, ruff, invoke
 ```
 
+Flags override auto-detection: `--local` installs from the checkout and never downloads, `--remote` always downloads the repo even from a checkout, and `--dev` also installs dev dependencies. `./install.sh --help` shows full usage.
+
 Re-running the installer replaces `~/.dvx/src` and reinstalls the Claude Code skills, so files and skills removed upstream are pruned on upgrade.
 
 Add to your shell config (~/.bashrc, ~/.zshrc, etc.):
