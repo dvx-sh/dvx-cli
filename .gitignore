@@ -215,3 +215,4 @@ doing/*
 done/*
 !done/.gitkeep
 .omx/
+.gstack/
