@@ -42,6 +42,7 @@ Single canonical installer. Auto-detects how it is run:
 
 - **Local clone** (`./install.sh`): detects the `dvx/` payload in the script's directory and installs from the checkout.
 - **Remote** (`curl … | bash`): downloads the GitHub archive, extracts it, and installs from that payload.
+- `--local` / `--remote` force a mode instead of auto-detecting; `--help` prints usage.
 - Pass `--dev` to also install dev dependencies (pytest, ruff).
 
 Steps in both modes:
