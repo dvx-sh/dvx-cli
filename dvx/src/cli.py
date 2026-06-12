@@ -83,30 +83,45 @@ from state import (
 SKILLS_DIR = Path(__file__).parent / "skills"
 
 
-def ensure_skills_installed() -> None:
+def ensure_skills_installed(
+    skills_dir: Optional[Path] = None,
+    commands_dir: Optional[Path] = None,
+) -> None:
     """
     Install dvx skills to ~/.claude/commands/dvx/.
 
     This copies all skill files from the package to the Claude Code commands
-    directory, making them available as /dvx:* commands.
+    directory, making them available as /dvx:* commands. Skills that no longer
+    exist in the package are removed so deleted skills don't linger as
+    /dvx:* commands.
     """
     import shutil
 
-    # Target directory for Claude Code commands
-    commands_dir = Path.home() / ".claude" / "commands" / "dvx"
+    if skills_dir is None:
+        skills_dir = SKILLS_DIR
+    if commands_dir is None:
+        commands_dir = Path.home() / ".claude" / "commands" / "dvx"
 
-    # Create target directory if it doesn't exist
+    if not skills_dir.exists():
+        return
+
     commands_dir.mkdir(parents=True, exist_ok=True)
 
-    # Copy all skill files (except template)
-    if SKILLS_DIR.exists():
-        for skill_file in SKILLS_DIR.glob("*.md"):
-            if skill_file.name.startswith("_"):
-                continue  # Skip template files
-            target = commands_dir / skill_file.name
-            # Only copy if source is newer or target doesn't exist
-            if not target.exists() or skill_file.stat().st_mtime > target.stat().st_mtime:
-                shutil.copy2(skill_file, target)
+    # Copy all skill files (except templates)
+    installed_names = set()
+    for skill_file in skills_dir.glob("*.md"):
+        if skill_file.name.startswith("_"):
+            continue  # Skip template files
+        installed_names.add(skill_file.name)
+        target = commands_dir / skill_file.name
+        # Only copy if source is newer or target doesn't exist
+        if not target.exists() or skill_file.stat().st_mtime > target.stat().st_mtime:
+            shutil.copy2(skill_file, target)
+
+    # Prune skills removed from the package
+    for installed in commands_dir.glob("*.md"):
+        if installed.name not in installed_names:
+            installed.unlink()
 
 
 def get_user_input_from_editor() -> str:

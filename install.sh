@@ -54,6 +54,10 @@ fi
 # --- Copy files --------------------------------------------------------------
 echo "Installing dvx to ${DVX_HOME}..."
 mkdir -p "$DVX_HOME"
+# Remove the old source tree first so files deleted from the package
+# (modules, skills) don't linger across upgrades. The venv lives at
+# ${DVX_HOME}/.venv and is untouched.
+rm -rf "$DVX_HOME/src"
 cp -r "$DVX_PAYLOAD/"* "$DVX_HOME/"
 
 # Make scripts executable
@@ -62,6 +66,9 @@ chmod +x "$DVX_HOME/bin/"*
 # --- Install Claude Code skills ----------------------------------------------
 echo "Installing skills to ${CLAUDE_COMMANDS}..."
 mkdir -p "$CLAUDE_COMMANDS"
+# The installer owns this directory: clear it first so skills deleted from
+# the package stop being /dvx:* commands.
+rm -f "$CLAUDE_COMMANDS"/*.md
 for skill in "$DVX_HOME/src/skills/"*.md; do
     name=$(basename "$skill")
     # Skip template files (leading underscore)
