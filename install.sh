@@ -6,14 +6,82 @@
 #   2. Remote (curl): curl -fsSL https://raw.githubusercontent.com/dvx-sh/dvx-cli/main/install.sh | bash
 #                                             (downloads the repo, then installs)
 #
-# Pass --dev to also install dev dependencies (pytest, ruff).
+# Flags:
+#   --local     Require a local checkout (this script next to a dvx/ payload);
+#               errors out instead of falling back to download.
+#   --remote    Always download the repo tarball and install from it, even
+#               when run from a checkout.
+#   --dev       Forwarded to ~/.dvx/bin/setup to also install dev
+#               dependencies (pytest, ruff).
+#   -h, --help  Print usage and exit.
+#
+# Environment:
+#   DVX_BRANCH        Branch to download in remote mode (default: main).
+#   DVX_REPO_TARBALL  Tarball URL override for remote mode (default: the
+#                     GitHub archive for DVX_BRANCH).
 
 set -e
 
 DVX_HOME="${HOME}/.dvx"
 CLAUDE_COMMANDS="${HOME}/.claude/commands/dvx"
 DVX_BRANCH="${DVX_BRANCH:-main}"
-REPO_TARBALL="https://github.com/dvx-sh/dvx-cli/archive/refs/heads/${DVX_BRANCH}.tar.gz"
+REPO_TARBALL="${DVX_REPO_TARBALL:-https://github.com/dvx-sh/dvx-cli/archive/refs/heads/${DVX_BRANCH}.tar.gz}"
+
+usage() {
+    cat <<EOF
+Usage: install.sh [--local | --remote] [--dev]
+
+Installs dvx to ~/.dvx and its skills to ~/.claude/commands/dvx.
+
+Modes (default: auto-detect):
+  --local     Install from the checkout containing this script. Errors if
+              the script is not next to a dvx/ payload; never downloads.
+  --remote    Download the repo tarball and install from it, even when run
+              from a checkout.
+  (no flag)   Use the local checkout when available, otherwise download.
+
+Options:
+  --dev       Forwarded to ~/.dvx/bin/setup to install dev dependencies
+              (pytest, ruff).
+  -h, --help  Show this help and exit.
+EOF
+}
+
+MODE="auto"
+SETUP_ARGS=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --local)
+            if [ "$MODE" = "remote" ]; then
+                echo "Error: --local and --remote are mutually exclusive." >&2
+                usage >&2
+                exit 1
+            fi
+            MODE="local"
+            ;;
+        --remote)
+            if [ "$MODE" = "local" ]; then
+                echo "Error: --local and --remote are mutually exclusive." >&2
+                usage >&2
+                exit 1
+            fi
+            MODE="remote"
+            ;;
+        --dev)
+            SETUP_ARGS+=("--dev")
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "Error: unknown option '$1'" >&2
+            usage >&2
+            exit 1
+            ;;
+    esac
+    shift
+done
 
 TMP_DIR=""
 cleanup() {
@@ -28,8 +96,25 @@ trap cleanup EXIT
 # contains the dvx/ payload. When piped from curl, $BASH_SOURCE is "bash"
 # (not a file), so we fall back to downloading the repo.
 SOURCE="${BASH_SOURCE[0]:-$0}"
+LOCAL_ROOT=""
 if [ -f "$SOURCE" ] && [ -d "$(cd "$(dirname "$SOURCE")" && pwd)/dvx" ]; then
-    SRC_ROOT="$(cd "$(dirname "$SOURCE")" && pwd)"
+    LOCAL_ROOT="$(cd "$(dirname "$SOURCE")" && pwd)"
+fi
+
+if [ "$MODE" = "local" ] && [ -z "$LOCAL_ROOT" ]; then
+    echo "Error: --local requires running install.sh from a checkout containing a dvx/ payload." >&2
+    exit 1
+fi
+if [ "$MODE" = "auto" ]; then
+    if [ -n "$LOCAL_ROOT" ]; then
+        MODE="local"
+    else
+        MODE="remote"
+    fi
+fi
+
+if [ "$MODE" = "local" ]; then
+    SRC_ROOT="$LOCAL_ROOT"
     echo "Installing dvx from local clone: ${SRC_ROOT}"
 else
     echo "Installing dvx from GitHub (${DVX_BRANCH})..."
@@ -78,4 +163,4 @@ for skill in "$DVX_HOME/src/skills/"*.md; do
 done
 
 # --- Run setup ---------------------------------------------------------------
-"$DVX_HOME/bin/setup" "$@"
+"$DVX_HOME/bin/setup" "${SETUP_ARGS[@]}"
