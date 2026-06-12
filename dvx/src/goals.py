@@ -747,6 +747,11 @@ def _step_run_claude(
         return False, f"Claude Code failed: {result.block_reason or 'session did not succeed'}"
     if GOAL_REJECTION_SIGNATURE in result.output:
         return False, f"/goal rejected the goal: {result.output.strip()[:300]}"
+    if result.result_event_seen is False:
+        # A cleanly finished session always emits a result event; without one
+        # the session was cut short (rate limit, crash) and the goal cannot be
+        # trusted as done.
+        return False, "Goal session was truncated before finishing (no result event)"
     if result.tool_use_count == 0:
         # A goal session that never used a single tool cannot have done any
         # work - treat it as a failure instead of silently completing.

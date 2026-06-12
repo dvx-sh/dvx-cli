@@ -660,6 +660,33 @@ class TestProcessGoal(GitRepoTestCase):
         assert state.current["status"] == STATUS_BRANCHED
         assert (Path(self.temp_dir) / "goals" / "GOAL-add-feature-x.md").exists()
 
+    def test_truncated_session_fails_run_step(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        self.add_goal("GOAL-add-feature-x.md")
+        state = self.new_state()
+        enqueue_new_goals(state)
+        claim_next_goal(state)
+
+        # Rate-limited/crashed sessions end without a result event - the goal
+        # cannot be trusted as done even if the process exited 0.
+        def truncated_runner(content):
+            return SessionResult(
+                output="partial work...",
+                session_id="s",
+                success=True,
+                tool_use_count=12,
+                result_event_seen=False,
+            )
+
+        ok, error = process_current_goal(
+            state, claude_runner=truncated_runner, commit_runner=fail_commit_runner
+        )
+
+        assert ok is False
+        assert "truncated" in error
+        assert state.current["status"] == STATUS_BRANCHED
+        assert (Path(self.temp_dir) / "goals" / "GOAL-add-feature-x.md").exists()
+
     def test_session_with_tool_use_completes(self, monkeypatch):
         monkeypatch.chdir(self.temp_dir)
         self.add_goal("GOAL-noop.md")

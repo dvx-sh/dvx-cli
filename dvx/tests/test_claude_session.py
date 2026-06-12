@@ -6,6 +6,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+import os
+import stat
+import textwrap
+
 from claude_session import (
     SessionResult,
     _count_tool_uses,
@@ -13,7 +17,99 @@ from claude_session import (
     _parse_stream_event,
     _parse_stream_output,
     _result_is_error,
+    run_claude,
 )
+
+
+def write_stub_claude(tmp_path, body: str):
+    """Install a fake `claude` executable on PATH that runs the python body."""
+    script = tmp_path / "claude"
+    script.write_text(f"#!/usr/bin/env python3\n{textwrap.dedent(body)}")
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    return script
+
+
+class TestRunClaudeStreaming:
+    """run_claude against a stub claude binary - pipes must be pumped live."""
+
+    def _with_stub_on_path(self, monkeypatch, tmp_path, body: str):
+        write_stub_claude(tmp_path, body)
+        monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+
+    def test_collects_events_and_result(self, monkeypatch, tmp_path):
+        self._with_stub_on_path(monkeypatch, tmp_path, """
+            import json
+            print(json.dumps({"type": "system", "message": "init"}))
+            print(json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "name": "Read", "input": {"file_path": "x"}}]}}))
+            print(json.dumps({"type": "result", "result": "done",
+                              "session_id": "sid-1", "is_error": False}))
+        """)
+
+        result = run_claude("hello", cwd=str(tmp_path), timeout=30)
+
+        assert result.success
+        assert result.output == "done"
+        assert result.session_id == "sid-1"
+        assert result.tool_use_count == 1
+        assert result.result_event_seen is True
+
+    def test_output_larger_than_pipe_buffer_is_not_truncated(self, monkeypatch, tmp_path):
+        # 300 events x ~4KB ≈ 1.2MB - far beyond the 64KB pipe buffer. The old
+        # single-threaded reader blocked on silent stderr while the child
+        # filled stdout, truncating the stream at exit.
+        self._with_stub_on_path(monkeypatch, tmp_path, """
+            import json
+            big = "x" * 4000
+            for i in range(300):
+                print(json.dumps({"type": "assistant", "message": {"content": [
+                    {"type": "tool_use", "name": "Bash", "input": {"command": big}}]}}))
+            print(json.dumps({"type": "result", "result": "all done", "session_id": "sid-2"}))
+        """)
+
+        result = run_claude("hello", cwd=str(tmp_path), timeout=30)
+
+        assert result.success
+        assert result.output == "all done"
+        assert result.tool_use_count == 300
+        assert result.result_event_seen is True
+
+    def test_truncated_stream_reports_no_result_event(self, monkeypatch, tmp_path):
+        self._with_stub_on_path(monkeypatch, tmp_path, """
+            import json
+            print(json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "partial"}]}}))
+        """)
+
+        result = run_claude("hello", cwd=str(tmp_path), timeout=30)
+
+        assert result.success  # exit 0 - the goals layer decides what to do
+        assert result.result_event_seen is False
+        assert result.output == "partial"
+
+    def test_error_result_event_fails_session(self, monkeypatch, tmp_path):
+        self._with_stub_on_path(monkeypatch, tmp_path, """
+            import json
+            print(json.dumps({"type": "result", "result": "boom",
+                              "is_error": True, "session_id": "sid-3"}))
+        """)
+
+        result = run_claude("hello", cwd=str(tmp_path), timeout=30)
+
+        assert result.success is False
+        assert result.block_reason == "session result reported an error"
+
+    def test_timeout_kills_process(self, monkeypatch, tmp_path):
+        self._with_stub_on_path(monkeypatch, tmp_path, """
+            import time
+            time.sleep(60)
+        """)
+
+        result = run_claude("hello", cwd=str(tmp_path), timeout=2)
+
+        assert result.success is False
+        assert result.blocked is True
+        assert "Timeout" in result.block_reason
 
 
 class TestResultIsError:
