@@ -40,6 +40,17 @@ The goal file is the entire instruction set the implementer receives, so make it
 self-contained.
 ```
 
+## Merge the watch branch
+
+Drop a file named `MERGE` in `.dvx/goals/` to ask the watcher to merge the watch branch into a remote branch. An empty file targets the remote's default branch; otherwise the file contains a single branch name and nothing else (e.g. `dev` — not `origin/dev`, no prose) — agents generate this file, so the convention matters.
+
+```bash
+touch .dvx/goals/MERGE            # merge into the default branch
+echo dev > .dvx/goals/MERGE       # merge into origin/dev
+```
+
+The merge runs between goals — after the in-flight goal finishes (if any) and before the next queued one; it takes precedence over the queue. The watcher fetches, merges the remote target into the watch branch (a Claude session resolves any conflicts), fast-forwards the remote target to the watch branch tip — never force-pushed, so if the target advances mid-merge the watcher re-fetches and re-merges instead of clobbering it — then pushes the watch branch. The MERGE file is consumed when claimed. Like goals, the merge only starts on a clean working tree, and it requires a git remote with the target branch already on it.
+
 ## Requirements
 
 - Python 3.10+
