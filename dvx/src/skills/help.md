@@ -19,17 +19,21 @@ DVX is a development orchestration system that automates implement → review �
 | `/dvx:review` | Review the implementation of a task |
 | `/dvx:escalate` | Evaluate a flagged situation and decide whether to proceed or escalate |
 | `/dvx:split-task` | Analyze a task to determine if it should be split into subtasks |
-| `/dvx:polish` | Perform a holistic review of all changes after task completion |
 | `/dvx:finalize` | Final quality gate before merge |
+| `/dvx:deslop` | Clean up LLM-written prose artifacts in changed files |
 | `/dvx:commit-task` | Mark a task complete and commit changes |
 | `/dvx:add-tests` | Add missing tests for a task implementation |
 
-### Planning Skills (Used by `dvx plan`)
+### Planning Skills (Used by `dvx plan`, `dvx interview`, and `dvx autopilot`)
 
 | Skill | Description |
 |-------|-------------|
 | `/dvx:create-plan` | Create a new implementation plan from requirements |
 | `/dvx:update-plan` | Update an existing plan file with changes |
+| `/dvx:interview` | Socratic clarification loop that turns a vague task into a spec |
+| `/dvx:consensus-planner` | Planner role in the consensus loop |
+| `/dvx:architect` | Architect role in the consensus loop (steelman challenges) |
+| `/dvx:critic` | Critic role in the consensus loop (final verdict) |
 
 ### Interactive Skills (For Humans)
 
@@ -49,9 +53,13 @@ The `dvx` CLI provides these commands:
 | `dvx plan <file>` | Create or update a PLAN file |
 | `dvx run <plan>` | Start or resume orchestration |
 | `dvx run <queue.yaml>` | Run multiple plans sequentially from a YAML queue |
-| `dvx status` | Show current status |
-| `dvx decisions` | Show decisions made during execution |
-| `dvx clean <plan>` | Clean up state for a plan |
+| `dvx interview <task>` | Run a deep-interview session that produces an execution-ready spec |
+| `dvx autopilot <task>` | Sequence interview → consensus plan → run end-to-end |
+| `dvx watch` | Watch the goals directory and process GOAL-*.md files with Claude Code |
+| `dvx clear` | Clear goal-processing state (leaves the goals directory untouched) |
+| `dvx status <plan>` | Show current status |
+| `dvx decisions <plan>` | Show decisions made during execution |
+| `dvx clean [plan]` | Clean up state for a plan (or all state if omitted) |
 
 ## Workflow
 
