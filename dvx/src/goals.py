@@ -42,6 +42,10 @@ QUEUED_GOAL_SNAPSHOT_MANIFEST = "manifest.json"
 GOAL_FILE_GLOB = "GOAL-*.md"
 GOAL_MODEL = "claude-fable-5"
 GOAL_TIMEOUT_SECONDS = 4 * 60 * 60
+# The built-in /goal command caps its condition argument; passing whole goal
+# files inline trips it, so the condition references the snapshot file instead.
+GOAL_CONDITION_MAX_CHARS = 4000
+GOAL_REJECTION_SIGNATURE = "Goal condition is limited to"
 COMMIT_TIMEOUT_SECONDS = 30 * 60
 DEFAULT_GOALS_DIR = ".dvx/goals"
 DEFAULT_POLL_INTERVAL = 2.0
@@ -329,10 +333,50 @@ def _ensure_branch_creation_claim(
 # Claude Code runners
 # ---------------------------------------------------------------------------
 
-def run_goal_with_claude(goal_content: str, cwd: Optional[str] = None) -> SessionResult:
+def build_goal_prompt(goal_content: str, project_dir: Optional[str] = None) -> str:
+    """
+    Build the /goal prompt for a goal session.
+
+    The /goal condition is capped at GOAL_CONDITION_MAX_CHARS, so the full goal
+    content is never passed inline. Instead the condition points at the snapshot
+    file the watcher wrote at claim time; the session reads it as its full
+    instructions. The snapshot is (re)written here so the referenced path is
+    always valid, even when recovering from partial state.
+    """
+    ensure_dvx_dir(GOALS_STATE_NAME, project_dir)
+    content_file = current_goal_content_file(project_dir)
+    content_file.write_text(goal_content)
+    return (
+        f"/goal Complete the goal specified in the file {content_file}. "
+        "Read that file first - it is the complete instruction set: requirements, "
+        "scope limits, decisions already made, verification commands, and rules. "
+        "The goal is met only when every requirement in that file is implemented "
+        "and every verification command in it passes. Do not modify anything "
+        "under .dvx/ (including that file)."
+    )
+
+
+def run_goal_with_claude(
+    goal_content: str,
+    cwd: Optional[str] = None,
+    project_dir: Optional[str] = None,
+) -> SessionResult:
     """Run Claude Code (Fable 5) with the /goal command for the goal contents."""
+    prompt = build_goal_prompt(goal_content, project_dir)
+    condition_len = len(prompt) - len("/goal ")
+    if condition_len > GOAL_CONDITION_MAX_CHARS:
+        return SessionResult(
+            output="",
+            session_id=None,
+            success=False,
+            blocked=True,
+            block_reason=(
+                f"goal condition is {condition_len} chars, over the /goal limit "
+                f"of {GOAL_CONDITION_MAX_CHARS}"
+            ),
+        )
     return run_claude(
-        prompt=f"/goal {goal_content}",
+        prompt=prompt,
         cwd=cwd,
         model=GOAL_MODEL,
         timeout=GOAL_TIMEOUT_SECONDS,
@@ -701,6 +745,13 @@ def _step_run_claude(
         return False, guard_error
     if not result.success:
         return False, f"Claude Code failed: {result.block_reason or 'session did not succeed'}"
+    if GOAL_REJECTION_SIGNATURE in result.output:
+        return False, f"/goal rejected the goal: {result.output.strip()[:300]}"
+    if result.tool_use_count == 0:
+        # A goal session that never used a single tool cannot have done any
+        # work - treat it as a failure instead of silently completing.
+        summary = result.output.strip()[:300] or "<no output>"
+        return False, f"Goal session ended without doing any work (no tool use). Output: {summary}"
     return True, ""
 
 
@@ -914,7 +965,9 @@ def process_current_goal(
     The status field records the last COMPLETED step, so this can resume
     after a crash at any point. Returns (ok, error).
     """
-    claude_runner = claude_runner or run_goal_with_claude
+    if claude_runner is None:
+        def claude_runner(content):
+            return run_goal_with_claude(content, project_dir=project_dir)
     commit_runner = commit_runner or commit_logical_groups_with_claude
 
     transitions = {

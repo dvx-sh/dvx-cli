@@ -101,6 +101,37 @@ class GitRepoTestCase:
         return goal
 
 
+class TestGoalPrompt:
+    def test_condition_references_snapshot_file_not_inline_content(self, monkeypatch, tmp_path):
+        captured = {}
+
+        def fake_run_claude(prompt, cwd=None, model=None, timeout=None):
+            captured["prompt"] = prompt
+            return SessionResult(output="", session_id="s", success=True, tool_use_count=3)
+
+        monkeypatch.setattr(goals_module, "run_claude", fake_run_claude)
+
+        # Far larger than the /goal condition cap - must never be inlined.
+        big_goal = "Do many things.\n" * 700
+        result = goals_module.run_goal_with_claude(big_goal, project_dir=str(tmp_path))
+
+        assert result.success
+        prompt = captured["prompt"]
+        assert prompt.startswith("/goal ")
+        condition = prompt[len("/goal "):]
+        assert len(condition) <= goals_module.GOAL_CONDITION_MAX_CHARS
+        assert big_goal not in prompt
+        content_file = current_goal_content_file(str(tmp_path))
+        assert str(content_file) in prompt
+        assert content_file.read_text() == big_goal
+
+    def test_snapshot_file_rewritten_when_missing(self, tmp_path):
+        prompt = goals_module.build_goal_prompt("Small goal.\n", project_dir=str(tmp_path))
+        content_file = current_goal_content_file(str(tmp_path))
+        assert content_file.read_text() == "Small goal.\n"
+        assert str(content_file) in prompt
+
+
 class TestGoalStatePersistence:
     def setup_method(self):
         self.temp_dir = tempfile.mkdtemp()
@@ -576,6 +607,78 @@ class TestProcessGoal(GitRepoTestCase):
         ok, error = process_current_goal(
             state, claude_runner=make_runner(), commit_runner=noop_commit_runner
         )
+        assert ok, error
+        assert state.current is None
+
+    def test_goal_rejection_output_fails_run_step(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        self.add_goal("GOAL-add-feature-x.md")
+        state = self.new_state()
+        enqueue_new_goals(state)
+        claim_next_goal(state)
+
+        # The /goal command rejects oversized conditions with plain text and
+        # exits 0 - the watcher must not mistake that for a completed goal.
+        def rejected_runner(content):
+            return SessionResult(
+                output="Goal condition is limited to 4000 characters (got 6953)",
+                session_id="s",
+                success=True,
+                tool_use_count=0,
+            )
+
+        ok, error = process_current_goal(
+            state, claude_runner=rejected_runner, commit_runner=fail_commit_runner
+        )
+
+        assert ok is False
+        assert "/goal rejected the goal" in error
+        assert state.current["status"] == STATUS_BRANCHED
+        assert (Path(self.temp_dir) / "goals" / "GOAL-add-feature-x.md").exists()
+
+    def test_session_without_tool_use_fails_run_step(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        self.add_goal("GOAL-add-feature-x.md")
+        state = self.new_state()
+        enqueue_new_goals(state)
+        claim_next_goal(state)
+
+        def idle_runner(content):
+            return SessionResult(
+                output="All done!",
+                session_id="s",
+                success=True,
+                tool_use_count=0,
+            )
+
+        ok, error = process_current_goal(
+            state, claude_runner=idle_runner, commit_runner=fail_commit_runner
+        )
+
+        assert ok is False
+        assert "without doing any work" in error
+        assert state.current["status"] == STATUS_BRANCHED
+        assert (Path(self.temp_dir) / "goals" / "GOAL-add-feature-x.md").exists()
+
+    def test_session_with_tool_use_completes(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        self.add_goal("GOAL-noop.md")
+        state = self.new_state()
+        enqueue_new_goals(state)
+        claim_next_goal(state)
+
+        def working_runner(content):
+            return SessionResult(
+                output="Verified - nothing to change.",
+                session_id="s",
+                success=True,
+                tool_use_count=7,
+            )
+
+        ok, error = process_current_goal(
+            state, claude_runner=working_runner, commit_runner=noop_commit_runner
+        )
+
         assert ok, error
         assert state.current is None
 

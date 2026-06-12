@@ -8,10 +8,49 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from claude_session import (
     SessionResult,
+    _count_tool_uses,
     _format_tool_params,
     _parse_stream_event,
     _parse_stream_output,
+    _result_is_error,
 )
+
+
+class TestResultIsError:
+    def test_false_without_result_event(self):
+        events = [{"type": "assistant", "message": {"content": []}}]
+        assert _result_is_error(events) is False
+
+    def test_false_when_result_reports_success(self):
+        events = [{"type": "result", "subtype": "success", "is_error": False}]
+        assert _result_is_error(events) is False
+
+    def test_true_when_result_reports_error(self):
+        events = [{"type": "result", "subtype": "error_during_execution", "is_error": True}]
+        assert _result_is_error(events) is True
+
+
+class TestCountToolUses:
+    def test_zero_for_text_only_session(self):
+        events = [
+            {"type": "system", "message": ""},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "hi"}]}},
+            {"type": "result", "result": "hi"},
+        ]
+        assert _count_tool_uses(events) == 0
+
+    def test_counts_tool_use_blocks_across_events(self):
+        events = [
+            {"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "name": "Read", "input": {}},
+                {"type": "text", "text": "reading"},
+            ]}},
+            {"type": "user", "message": {"content": []}},
+            {"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "name": "Edit", "input": {}},
+            ]}},
+        ]
+        assert _count_tool_uses(events) == 2
 
 
 class TestStatusOverridesTruth:

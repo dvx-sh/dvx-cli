@@ -24,6 +24,9 @@ class SessionResult:
     success: bool
     blocked: bool = False
     block_reason: Optional[str] = None
+    # Number of tool_use blocks observed in the session. None means unknown
+    # (e.g. results built by callers that did not stream events).
+    tool_use_count: Optional[int] = None
 
 
 def _format_tool_params(tool_name: str, tool_input: dict) -> str:
@@ -178,6 +181,27 @@ def _parse_stream_output(events: list[dict]) -> tuple[str, Optional[str], bool, 
     return text_output, session_id, is_blocked, block_reason
 
 
+def _result_is_error(events: list[dict]) -> bool:
+    """True if the final result event reported an error (exit code 0 or not)."""
+    for data in events:
+        if isinstance(data, dict) and data.get('type') == 'result':
+            if data.get('is_error', False):
+                return True
+    return False
+
+
+def _count_tool_uses(events: list[dict]) -> int:
+    """Count tool_use blocks across assistant events."""
+    count = 0
+    for data in events:
+        if not isinstance(data, dict) or data.get('type') != 'assistant':
+            continue
+        content = data.get('message', {}).get('content', [])
+        if isinstance(content, list):
+            count += sum(1 for block in content if block.get('type') == 'tool_use')
+    return count
+
+
 def run_claude(
     prompt: str,
     cwd: Optional[str] = None,
@@ -291,13 +315,17 @@ def run_claude(
         logger.debug(f"Collected {len(stream_events)} stream events")
 
         text, sid, blocked, block_reason = _parse_stream_output(stream_events)
+        is_error = _result_is_error(stream_events)
+        if is_error:
+            logger.warning("Claude result event reported an error despite session ending")
 
         return SessionResult(
             output=text,
             session_id=sid or session_id,  # Keep existing if not returned
-            success=retcode == 0,
+            success=retcode == 0 and not is_error,
             blocked=blocked,
-            block_reason=block_reason,
+            block_reason=block_reason or ("session result reported an error" if is_error else None),
+            tool_use_count=_count_tool_uses(stream_events),
         )
 
     except subprocess.TimeoutExpired:

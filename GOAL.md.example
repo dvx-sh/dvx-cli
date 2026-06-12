@@ -12,12 +12,14 @@ How to use:
    `dvx watch` afterwards). The watcher queues files in arrival order.
 
 What the implementer session is (write the goal for THIS audience):
-- The ENTIRE contents of this file are passed to a single headless Claude Code
-  (Fable 5) session via the built-in /goal command: `claude -p "/goal <this file>"`.
-  That sets the session's goal, which the harness checks is met before the session
-  may stop — so write requirements as outcomes that check can verify. Beyond that,
-  this file is all the instruction and context the implementer receives; it cannot
-  see the conversation that produced it.
+- This file is handed to a single headless Claude Code (Fable 5) session: the
+  watcher snapshots it to .dvx/watch/current-goal.md and starts the session with
+  the built-in /goal command pointing at that snapshot (the /goal condition has
+  a 4000-character cap, so file contents are never passed inline). The goal is
+  checked before the session may stop — so write requirements as outcomes that
+  check can verify. This file is all the instruction and context the implementer
+  receives; it cannot see the conversation that produced it. There is no length
+  limit on this file.
 - The session is non-interactive. Nobody can answer questions, so this file must
   pre-answer every decision. Anything left ambiguous will be decided by the
   implementer alone.
