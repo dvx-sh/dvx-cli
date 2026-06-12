@@ -862,7 +862,7 @@ def cmd_watch(args) -> int:
     """
     Watch the goals directory and process GOAL-*.md files one at a time.
 
-    Each goal is queued in .dvx/goals/state.json, worked on its own branch
+    Each goal is queued in .dvx/watch/state.json, worked on its own branch
     by Claude Code (Fable 5, /goal command), committed in logical groups,
     merged back into the branch watch started on, and cleaned up. All state
     transitions are persisted atomically so the watcher recovers from a
@@ -895,7 +895,7 @@ def cmd_clear(args) -> int:
     processing them from scratch.
     """
     if clear_goal_state():
-        print("Cleared goal state (.dvx/goals/). Goal files were left in place.")
+        print("Cleared goal state (.dvx/watch/). Goal files were left in place.")
     else:
         print("No goal state to clear.")
     return 0

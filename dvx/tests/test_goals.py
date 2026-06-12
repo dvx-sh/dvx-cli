@@ -1452,10 +1452,12 @@ class TestRunGoalWatch(GitRepoTestCase):
         assert state.current is None
         assert [c["goal_file"] for c in state.completed] == ["GOAL-flaky.md"]
 
-    def test_uses_saved_watch_branch_on_recovery(self, monkeypatch):
-        """The original watch branch wins even if watch restarts elsewhere."""
+    def test_uses_saved_watch_branch_when_resuming_pending_work(self, monkeypatch):
+        """The original watch branch wins when there is pending work to resume."""
         monkeypatch.chdir(self.temp_dir)
-        save_goal_state(GoalState(watch_branch="work", goals_dir="./goals"))
+        save_goal_state(
+            GoalState(watch_branch="work", goals_dir="./goals", queue=["GOAL-one.md"])
+        )
         self.add_goal("GOAL-one.md")
 
         rc = run_goal_watch(
@@ -1469,3 +1471,62 @@ class TestRunGoalWatch(GitRepoTestCase):
         assert rc == 0
         assert load_goal_state().watch_branch == "work"
         assert run_git(["rev-parse", "--abbrev-ref", "HEAD"], self.temp_dir) == "work"
+
+    def test_idle_state_is_discarded_on_start(self, monkeypatch, capsys):
+        """Idle saved state has nothing to resume; a restart starts fresh."""
+        monkeypatch.chdir(self.temp_dir)
+        save_goal_state(GoalState(watch_branch="no-longer-exists", goals_dir="./goals"))
+
+        rc = run_goal_watch("work", goals_dir="./goals", once=True)
+
+        assert rc == 0
+        assert "Recovered goal state" not in capsys.readouterr().out
+        assert load_goal_state().watch_branch == "work"
+
+    def test_idle_state_with_history_is_discarded_on_start(self, monkeypatch):
+        """Completed/failed history alone does not make saved state resumable."""
+        monkeypatch.chdir(self.temp_dir)
+        stale = GoalState(watch_branch="no-longer-exists", goals_dir="./goals")
+        stale.completed = [{"goal_file": "GOAL-old.md"}]
+        stale.failed = [{"goal_file": "GOAL-bad.md", "reason": "empty goal file"}]
+        save_goal_state(stale)
+
+        rc = run_goal_watch("work", goals_dir="./goals", once=True)
+
+        assert rc == 0
+        state = load_goal_state()
+        assert state.watch_branch == "work"
+        assert state.completed == []
+        assert state.failed == []
+
+    def test_pending_work_with_missing_watch_branch_errors_before_claiming(
+        self,
+        monkeypatch,
+        capsys,
+    ):
+        """Resumable state whose watch branch is gone fails loudly and untouched."""
+        monkeypatch.chdir(self.temp_dir)
+        save_goal_state(
+            GoalState(
+                watch_branch="no-longer-exists",
+                goals_dir="./goals",
+                queue=["GOAL-one.md"],
+            )
+        )
+        self.add_goal("GOAL-one.md")
+
+        rc = run_goal_watch(
+            "work",
+            goals_dir="./goals",
+            once=True,
+            claude_runner=fail_goal_runner,
+            commit_runner=fail_commit_runner,
+        )
+
+        assert rc == 1
+        out = capsys.readouterr().out
+        assert "no-longer-exists" in out
+        assert "dvx clear" in out
+        state = load_goal_state()
+        assert state.current is None
+        assert state.queue == ["GOAL-one.md"]

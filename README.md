@@ -63,7 +63,7 @@ The `run` command handles everything automatically:
 
 ## Goal Watch
 
-`dvx watch` watches a goals directory (default `./goals`) for `GOAL-*.md` files and processes them one at a time: each goal gets its own branch, a headless Claude session implements it, changes are committed in logical groups, and the branch is merged back. State persists in `.dvx/goals/`, so a killed watcher resumes where it left off. See `dvx watch --help` for options.
+`dvx watch` watches a goals directory (default `.dvx/goals`) for `GOAL-*.md` files and processes them one at a time: each goal gets its own branch, a headless Claude session implements it, changes are committed in logical groups, and the branch is merged back. State persists in `.dvx/watch/`, so a killed watcher resumes where it left off. See `dvx watch --help` for options.
 
 ```bash
 dvx watch
@@ -72,7 +72,7 @@ dvx watch
 Queue a goal from the template:
 
 ```bash
-curl -s https://raw.githubusercontent.com/dvx-sh/dvx-cli/main/GOAL.md.example -o goals/GOAL-my-change.md
+curl -s https://raw.githubusercontent.com/dvx-sh/dvx-cli/main/GOAL.md.example -o .dvx/goals/GOAL-my-change.md
 ```
 
 Fill in the template's sections — the goal file is the entire prompt the implementer receives, so it must be self-contained. The filename determines the branch name (`GOAL-my-change.md` → branch `goal-my-change`).

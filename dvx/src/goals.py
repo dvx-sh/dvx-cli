@@ -1,12 +1,15 @@
 """
 Goal queue processing for `dvx watch`.
 
-Watches a goals directory for GOAL-*.md files and processes them one at a
-time: each goal gets its own working branch, is handed to Claude Code
-(Fable 5) via the /goal command, and is merged back into the branch that
-was active when the watcher started.
+Watches a goals directory (default .dvx/goals/) for GOAL-*.md files and
+processes them one at a time: each goal gets its own working branch, is
+handed to Claude Code (Fable 5) via the /goal command, and is merged back
+into the branch that was active when the watcher started.
 
-All state lives in .dvx/goals/state.json and is written atomically
+The watched directory lives under .dvx/ so it is created by dvx itself and
+is already gitignored - other sessions can queue work simply by dropping
+GOAL-*.md files there. Watcher state lives separately in
+.dvx/watch/state.json (outside the watched directory) and is written atomically
 (temp file + os.replace), so the watcher can be killed or crash at any
 point and `dvx watch` will recover and continue from the last completed
 step.
@@ -30,7 +33,8 @@ from state import ensure_dvx_dir, get_dvx_dir
 
 logger = logging.getLogger(__name__)
 
-GOALS_STATE_NAME = "goals"
+# Watcher state lives in .dvx/watch/, NOT in the watched .dvx/goals/ inbox.
+GOALS_STATE_NAME = "watch"
 GOALS_STATE_FILE = "state.json"
 CURRENT_GOAL_CONTENT_FILE = "current-goal.md"
 QUEUED_GOAL_SNAPSHOT_DIR = "queued-goals"
@@ -39,7 +43,7 @@ GOAL_FILE_GLOB = "GOAL-*.md"
 GOAL_MODEL = "claude-fable-5"
 GOAL_TIMEOUT_SECONDS = 4 * 60 * 60
 COMMIT_TIMEOUT_SECONDS = 30 * 60
-DEFAULT_GOALS_DIR = "./goals"
+DEFAULT_GOALS_DIR = ".dvx/goals"
 DEFAULT_POLL_INTERVAL = 2.0
 
 # Step statuses for the current goal. Each status names the step that has
@@ -539,7 +543,7 @@ def claim_next_goal(state: GoalState, project_dir: Optional[str] = None) -> Opti
     Atomically claim the next goal in the queue as the current goal.
 
     Reviews the goal file (it must exist and be non-empty) and copies the
-    current goal contents into .dvx/goals/ so the run step can recover even if
+    current goal contents into .dvx/watch/ so the run step can recover even if
     the goal file is later deleted. Unusable goals are recorded in state.failed
     and skipped.
     """
@@ -954,6 +958,17 @@ def _blocked_dirty_paths_changed(state: GoalState) -> tuple[bool, str]:
 # Watch loop
 # ---------------------------------------------------------------------------
 
+def _has_resumable_work(state: GoalState) -> bool:
+    """
+    True if saved state contains work a new watcher run must continue.
+
+    Completed/failed history does not count: an idle state file carries
+    nothing worth recovering, and its saved watch branch goes stale as soon
+    as the user switches branches.
+    """
+    return bool(state.current or state.blocked or state.queue)
+
+
 def run_goal_watch(
     start_branch: str,
     goals_dir: str = DEFAULT_GOALS_DIR,
@@ -966,18 +981,34 @@ def run_goal_watch(
     """
     Watch the goals directory and process goals until interrupted.
 
-    Recovers from any prior state: an in-flight goal resumes at the step
-    after the last one recorded, then the queue continues. With once=True,
-    returns as soon as there is no pending work (used by tests).
+    Saved state is recovered only when it has resumable work (an in-flight,
+    blocked, or queued goal) — an idle state file from a previous run is
+    discarded so each watch starts from the branch it was launched on. An
+    in-flight goal resumes at the step after the last one recorded, then the
+    queue continues. With once=True, returns as soon as there is no pending
+    work (used by tests).
     """
     Path(goals_dir).mkdir(parents=True, exist_ok=True)
 
     state = load_goal_state(project_dir)
+    if state is not None and not _has_resumable_work(state):
+        clear_goal_state(project_dir)
+        state = None
     if state is None:
         state = GoalState(watch_branch=start_branch, goals_dir=goals_dir)
         save_goal_state(state, project_dir)
         print(f"Watch branch: {state.watch_branch}")
     else:
+        if not branch_exists(state.watch_branch):
+            print(
+                "Error: saved goal state has pending work, but its watch branch "
+                f"'{state.watch_branch}' no longer exists."
+            )
+            print(
+                "Recreate the branch to resume, or run `dvx clear` to discard "
+                "the saved state and start fresh."
+            )
+            return 1
         print(f"Recovered goal state (watch branch: {state.watch_branch})")
         if state.current:
             print(

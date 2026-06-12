@@ -2,7 +2,7 @@
 GOAL file template for `dvx watch`.
 
 How to use:
-1. Copy this file to <goals-dir>/GOAL-<short-slug>.md (default goals dir: ./goals).
+1. Copy this file to <goals-dir>/GOAL-<short-slug>.md (default goals dir: .dvx/goals).
    The filename becomes the working branch name: GOAL-add-rate-limit.md -> branch goal-add-rate-limit.
    Use only lowercase letters, digits, and dashes in the slug, and pick a slug whose
    goal-<slug> branch does not already exist — otherwise the watcher skips the goal as failed.
@@ -89,7 +89,7 @@ these itself — include any setup needed (venv activation, env vars, etc.).>
 - Work only on the current branch. Do NOT push, open pull requests, switch
   branches, or merge — the watcher handles integration.
 - Do NOT create, modify, or delete anything under the goals directory (default
-  `./goals/`) or `.dvx/`. The watcher fails the goal if commits touch these paths
+  `.dvx/goals/`) or `.dvx/`. The watcher fails the goal if commits touch these paths
   or if queued GOAL-*.md files change during the session.
 - Committing is optional: a follow-up session commits remaining changes in logical
   groups. If you do commit, exclude the goals directory and `.dvx/`, and explain
