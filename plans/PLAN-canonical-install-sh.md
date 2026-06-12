@@ -1,20 +1,7 @@
 # Plan: Make `install.sh` the Canonical dvx Installer
 
-Status: **In Progress**
+Status: **Complete** — all acceptance criteria met; pending merge to main
 Created: 2026-06-06
-
-## Implementation Notes
-
-Branch `update-install` has:
-- `install.sh` unified with auto-detect (local clone vs piped curl)
-- `install-remote.sh` deleted
-- README installation section updated
-- `AGENTS.md` updated to reflect unified installer shape
-- `GOAL.md.example` template added
-
-Remaining before merge:
-- Test coverage for install modes
-- `--local` / `--remote` explicit modes (plan mentions optional; auto-detect is the primary path)
 
 ## Goal
 
