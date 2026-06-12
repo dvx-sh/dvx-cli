@@ -1,5 +1,7 @@
 # PLAN: Refactor Embedded Prompts to Skills
 
+**Status**: Complete
+
 ## Goal
 
 Move embedded prompts from Python code to skill files where manual invocation is valuable. Keep process-specific prompts embedded when they serve automation only.
@@ -74,66 +76,66 @@ Move embedded prompts from Python code to skill files where manual invocation is
 
 ### Phase 1: Create New Skills
 
-1. [ ] Create `src/skills/create-plan.md`
+1. [x] Create `src/skills/create-plan.md`
    - Extract from `cli.py:145`
    - Add arguments: `requirements`, `output_file` (optional)
    - Include plan structure guidelines
 
-2. [ ] Create `src/skills/update-plan.md`
+2. [x] Create `src/skills/update-plan.md`
    - Extract from `cli.py:125`
    - Add arguments: `plan_file`, `changes`
    - Include update guidelines (preserve structure, add tasks)
 
-3. [ ] Create `src/skills/commit-task.md`
+3. [x] Create `src/skills/commit-task.md`
    - Extract from `orchestrator.py:1057`
    - Add arguments: `task_id`, `task_title`, `plan_file`
    - Include lean commit guidelines (already in implement.md)
 
-4. [ ] Create `src/skills/add-tests.md`
+4. [x] Create `src/skills/add-tests.md`
    - Extract from `orchestrator.py:1674`
    - Add arguments: `task_id`, `task_title`, `reviewer_notes`
    - Include test writing guidelines
 
-5. [ ] Create `src/skills/resolve-blocked.md`
+5. [x] Create `src/skills/resolve-blocked.md`
    - Extract from `cli.py:337`
    - Add arguments: `plan_file`, `blocked_reason`, `context`
    - Include resolution strategies
 
 ### Phase 2: Update Code to Use Skills
 
-6. [ ] Update `cli.py` to use `run_skill("create-plan", ...)`
+6. [x] Update `cli.py` to use `run_skill("create-plan", ...)`
    - Replace embedded prompt at line 145
    - Handle argument passing
 
-7. [ ] Update `cli.py` to use `run_skill("update-plan", ...)`
+7. [x] Update `cli.py` to use `run_skill("update-plan", ...)`
    - Replace embedded prompt at line 125
    - Handle argument passing
 
-8. [ ] Update `orchestrator.py` to use `run_skill("commit-task", ...)`
+8. [x] Update `orchestrator.py` to use `run_skill("commit-task", ...)`
    - Replace `run_implementer_commit()` prompt at line 1057
    - Keep function wrapper for orchestrator integration
 
-9. [ ] Update `orchestrator.py` to use `run_skill("add-tests", ...)`
+9. [x] Update `orchestrator.py` to use `run_skill("add-tests", ...)`
    - Replace embedded prompt at line 1674
    - Keep function wrapper for orchestrator integration
 
-10. [ ] Update `cli.py` to use `run_skill("resolve-blocked", ...)`
+10. [x] Update `cli.py` to use `run_skill("resolve-blocked", ...)`
     - Replace embedded prompt at line 337
     - Handle interactive resolution
 
 ### Phase 3: Documentation
 
-11. [ ] Update `help.md` to list new manual skills
-12. [ ] Add examples to each new skill's description
+11. [x] Update `help.md` to list new manual skills
+12. [x] Add examples to each new skill's description
 
 ---
 
 ## Verification
 
-- [ ] All existing tests pass
-- [ ] `dvx plan "test requirement"` works (uses create-plan skill)
-- [ ] `dvx run` completes full cycle (uses commit-task skill)
-- [ ] Manual skill invocation works: `/dvx:create-plan`, `/dvx:commit-task`
+- [x] All existing tests pass
+- [x] `dvx plan "test requirement"` works (uses create-plan skill)
+- [x] `dvx run` completes full cycle (uses commit-task skill)
+- [x] Manual skill invocation works: `/dvx:create-plan`, `/dvx:commit-task`
 
 ---
 
