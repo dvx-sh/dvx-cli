@@ -20,8 +20,10 @@ Or clone and run the same script locally:
 ```bash
 git clone https://github.com/dvx-sh/dvx-cli.git
 cd dvx-cli
-./install.sh           # add --dev to also install pytest, ruff
+./install.sh           # add --dev to also install pytest, ruff, invoke
 ```
+
+Re-running the installer replaces `~/.dvx/src` and reinstalls the Claude Code skills, so files and skills removed upstream are pruned on upgrade.
 
 Add to your shell config (~/.bashrc, ~/.zshrc, etc.):
 
@@ -33,7 +35,7 @@ export PATH="${HOME}/.dvx/bin:$PATH"
 
 ```bash
 cd ~/.dvx && source .venv/bin/activate
-pip install -e ".[dev]"        # pytest, ruff
+pip install -e ".[dev]"        # pytest, ruff, invoke
 pip install -e ".[automation]" # invoke, fabric
 pip install -e ".[ai]"         # anthropic
 ```
@@ -41,18 +43,23 @@ pip install -e ".[ai]"         # anthropic
 ## Usage
 
 ```bash
-# Generate a plan with Claude ultrathink
+# Generate a plan with Claude
 echo "Create a user authentication system" | dvx plan PLAN-auth.md
 dvx plan                       # Opens editor, Claude names the file
+dvx plan --consensus           # Planner/Architect/Critic consensus loop
 
 # Run orchestration
 dvx run PLAN-feature.md        # Run orchestration
 dvx run -s PLAN-feature.md     # Step mode: pause after each task
-dvx run --force PLAN-feature.md  # Force restart with new plan
+dvx run -f PLAN-feature.md     # Force restart with new plan
 
-dvx status                     # Show current status
-dvx decisions                  # Show decisions made
-dvx clean                      # Delete .dvx/ directory
+dvx status PLAN-feature.md     # Show current status for a plan
+dvx decisions PLAN-feature.md  # Show decisions made for a plan
+dvx clean [PLAN-feature.md]    # Delete plan state (all of .dvx/ if omitted)
+
+# Higher-level workflows
+dvx interview "task"           # Deep-interview session producing an execution-ready spec
+dvx autopilot "task"           # Sequence interview → consensus plan → run end-to-end
 ```
 
 The `run` command handles everything automatically:
@@ -63,7 +70,7 @@ The `run` command handles everything automatically:
 
 ## Goal Watch
 
-`dvx watch` watches a goals directory (default `.dvx/goals`) for `GOAL-*.md` files and processes them one at a time: each goal gets its own branch, a headless Claude session implements it, changes are committed in logical groups, and the branch is merged back. State persists in `.dvx/watch/`, so a killed watcher resumes where it left off. See `dvx watch --help` for options.
+`dvx watch` watches a goals directory (default `.dvx/goals`) for `GOAL-*.md` files and processes them one at a time: each goal gets its own branch, a headless Claude session implements it, changes are committed in logical groups, and the branch is merged back. State persists in `.dvx/watch/`, so a killed watcher resumes where it left off. `dvx clear` resets goal-processing state (the goals directory itself is untouched). See `dvx watch --help` for options.
 
 ```bash
 dvx watch
@@ -86,7 +93,7 @@ Installing dvx also installs `/dvx:*` skills for Claude Code. Use them directly 
 /dvx:status    # Show current orchestration state
 ```
 
-The orchestration skills (implement, review, polish, finalize, etc.) are used internally by `dvx run`.
+The orchestration skills (implement, review, finalize, deslop, etc.) are used internally by `dvx run`.
 
 ## How It Works
 
@@ -101,7 +108,7 @@ The orchestration skills (implement, review, polish, finalize, etc.) are used in
 
 ## Plan Files
 
-Use `dvx plan` to generate plans with Claude ultrathink mode:
+Use `dvx plan` to generate plans with Claude:
 
 ```bash
 # Piped input with explicit filename
@@ -132,11 +139,12 @@ Add tests for...
 ## Project State
 
 dvx stores state in `.dvx/` in your project:
-- `state.json` - Current orchestration state
-- `task-status.json` - Task completion status
-- `blocked-context.md` - Context when blocked
-- `DECISIONS-*.md` - Decisions made by Claude
-- `dvx.log` - Debug log
+- `<plan-file>/state.json` - Orchestration state for that plan
+- `<plan-file>/blocked-context.md` - Context when blocked
+- `<plan-file>/DECISIONS-*.md` - Decisions made by Claude
+- `<plan-file>/dvx.log` - Debug log
+- `task-status.json` - Task completion status (all plans)
+- `watch/` - Goal watcher state
 
 ## License
 
