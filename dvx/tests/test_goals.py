@@ -101,6 +101,37 @@ class GitRepoTestCase:
         return goal
 
 
+class TestGoalPrompt:
+    def test_condition_references_snapshot_file_not_inline_content(self, monkeypatch, tmp_path):
+        captured = {}
+
+        def fake_run_claude(prompt, cwd=None, model=None, timeout=None):
+            captured["prompt"] = prompt
+            return SessionResult(output="", session_id="s", success=True, tool_use_count=3)
+
+        monkeypatch.setattr(goals_module, "run_claude", fake_run_claude)
+
+        # Far larger than the /goal condition cap - must never be inlined.
+        big_goal = "Do many things.\n" * 700
+        result = goals_module.run_goal_with_claude(big_goal, project_dir=str(tmp_path))
+
+        assert result.success
+        prompt = captured["prompt"]
+        assert prompt.startswith("/goal ")
+        condition = prompt[len("/goal "):]
+        assert len(condition) <= goals_module.GOAL_CONDITION_MAX_CHARS
+        assert big_goal not in prompt
+        content_file = current_goal_content_file(str(tmp_path))
+        assert str(content_file) in prompt
+        assert content_file.read_text() == big_goal
+
+    def test_snapshot_file_rewritten_when_missing(self, tmp_path):
+        prompt = goals_module.build_goal_prompt("Small goal.\n", project_dir=str(tmp_path))
+        content_file = current_goal_content_file(str(tmp_path))
+        assert content_file.read_text() == "Small goal.\n"
+        assert str(content_file) in prompt
+
+
 class TestGoalStatePersistence:
     def setup_method(self):
         self.temp_dir = tempfile.mkdtemp()
@@ -576,6 +607,105 @@ class TestProcessGoal(GitRepoTestCase):
         ok, error = process_current_goal(
             state, claude_runner=make_runner(), commit_runner=noop_commit_runner
         )
+        assert ok, error
+        assert state.current is None
+
+    def test_goal_rejection_output_fails_run_step(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        self.add_goal("GOAL-add-feature-x.md")
+        state = self.new_state()
+        enqueue_new_goals(state)
+        claim_next_goal(state)
+
+        # The /goal command rejects oversized conditions with plain text and
+        # exits 0 - the watcher must not mistake that for a completed goal.
+        def rejected_runner(content):
+            return SessionResult(
+                output="Goal condition is limited to 4000 characters (got 6953)",
+                session_id="s",
+                success=True,
+                tool_use_count=0,
+            )
+
+        ok, error = process_current_goal(
+            state, claude_runner=rejected_runner, commit_runner=fail_commit_runner
+        )
+
+        assert ok is False
+        assert "/goal rejected the goal" in error
+        assert state.current["status"] == STATUS_BRANCHED
+        assert (Path(self.temp_dir) / "goals" / "GOAL-add-feature-x.md").exists()
+
+    def test_session_without_tool_use_fails_run_step(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        self.add_goal("GOAL-add-feature-x.md")
+        state = self.new_state()
+        enqueue_new_goals(state)
+        claim_next_goal(state)
+
+        def idle_runner(content):
+            return SessionResult(
+                output="All done!",
+                session_id="s",
+                success=True,
+                tool_use_count=0,
+            )
+
+        ok, error = process_current_goal(
+            state, claude_runner=idle_runner, commit_runner=fail_commit_runner
+        )
+
+        assert ok is False
+        assert "without doing any work" in error
+        assert state.current["status"] == STATUS_BRANCHED
+        assert (Path(self.temp_dir) / "goals" / "GOAL-add-feature-x.md").exists()
+
+    def test_truncated_session_fails_run_step(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        self.add_goal("GOAL-add-feature-x.md")
+        state = self.new_state()
+        enqueue_new_goals(state)
+        claim_next_goal(state)
+
+        # Rate-limited/crashed sessions end without a result event - the goal
+        # cannot be trusted as done even if the process exited 0.
+        def truncated_runner(content):
+            return SessionResult(
+                output="partial work...",
+                session_id="s",
+                success=True,
+                tool_use_count=12,
+                result_event_seen=False,
+            )
+
+        ok, error = process_current_goal(
+            state, claude_runner=truncated_runner, commit_runner=fail_commit_runner
+        )
+
+        assert ok is False
+        assert "truncated" in error
+        assert state.current["status"] == STATUS_BRANCHED
+        assert (Path(self.temp_dir) / "goals" / "GOAL-add-feature-x.md").exists()
+
+    def test_session_with_tool_use_completes(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        self.add_goal("GOAL-noop.md")
+        state = self.new_state()
+        enqueue_new_goals(state)
+        claim_next_goal(state)
+
+        def working_runner(content):
+            return SessionResult(
+                output="Verified - nothing to change.",
+                session_id="s",
+                success=True,
+                tool_use_count=7,
+            )
+
+        ok, error = process_current_goal(
+            state, claude_runner=working_runner, commit_runner=noop_commit_runner
+        )
+
         assert ok, error
         assert state.current is None
 
@@ -1452,10 +1582,12 @@ class TestRunGoalWatch(GitRepoTestCase):
         assert state.current is None
         assert [c["goal_file"] for c in state.completed] == ["GOAL-flaky.md"]
 
-    def test_uses_saved_watch_branch_on_recovery(self, monkeypatch):
-        """The original watch branch wins even if watch restarts elsewhere."""
+    def test_uses_saved_watch_branch_when_resuming_pending_work(self, monkeypatch):
+        """The original watch branch wins when there is pending work to resume."""
         monkeypatch.chdir(self.temp_dir)
-        save_goal_state(GoalState(watch_branch="work", goals_dir="./goals"))
+        save_goal_state(
+            GoalState(watch_branch="work", goals_dir="./goals", queue=["GOAL-one.md"])
+        )
         self.add_goal("GOAL-one.md")
 
         rc = run_goal_watch(
@@ -1469,3 +1601,62 @@ class TestRunGoalWatch(GitRepoTestCase):
         assert rc == 0
         assert load_goal_state().watch_branch == "work"
         assert run_git(["rev-parse", "--abbrev-ref", "HEAD"], self.temp_dir) == "work"
+
+    def test_idle_state_is_discarded_on_start(self, monkeypatch, capsys):
+        """Idle saved state has nothing to resume; a restart starts fresh."""
+        monkeypatch.chdir(self.temp_dir)
+        save_goal_state(GoalState(watch_branch="no-longer-exists", goals_dir="./goals"))
+
+        rc = run_goal_watch("work", goals_dir="./goals", once=True)
+
+        assert rc == 0
+        assert "Recovered goal state" not in capsys.readouterr().out
+        assert load_goal_state().watch_branch == "work"
+
+    def test_idle_state_with_history_is_discarded_on_start(self, monkeypatch):
+        """Completed/failed history alone does not make saved state resumable."""
+        monkeypatch.chdir(self.temp_dir)
+        stale = GoalState(watch_branch="no-longer-exists", goals_dir="./goals")
+        stale.completed = [{"goal_file": "GOAL-old.md"}]
+        stale.failed = [{"goal_file": "GOAL-bad.md", "reason": "empty goal file"}]
+        save_goal_state(stale)
+
+        rc = run_goal_watch("work", goals_dir="./goals", once=True)
+
+        assert rc == 0
+        state = load_goal_state()
+        assert state.watch_branch == "work"
+        assert state.completed == []
+        assert state.failed == []
+
+    def test_pending_work_with_missing_watch_branch_errors_before_claiming(
+        self,
+        monkeypatch,
+        capsys,
+    ):
+        """Resumable state whose watch branch is gone fails loudly and untouched."""
+        monkeypatch.chdir(self.temp_dir)
+        save_goal_state(
+            GoalState(
+                watch_branch="no-longer-exists",
+                goals_dir="./goals",
+                queue=["GOAL-one.md"],
+            )
+        )
+        self.add_goal("GOAL-one.md")
+
+        rc = run_goal_watch(
+            "work",
+            goals_dir="./goals",
+            once=True,
+            claude_runner=fail_goal_runner,
+            commit_runner=fail_commit_runner,
+        )
+
+        assert rc == 1
+        out = capsys.readouterr().out
+        assert "no-longer-exists" in out
+        assert "dvx clear" in out
+        state = load_goal_state()
+        assert state.current is None
+        assert state.queue == ["GOAL-one.md"]

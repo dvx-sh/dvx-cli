@@ -14,15 +14,10 @@ Show the current state of DVX orchestration.
 
 ## Instructions
 
-1. **Find the plan file**:
-   {{#if plan_file}}
-   Use the specified plan file: $ARGUMENTS.plan_file
-   {{else}}
-   Look for active plans:
+1. **Find the plan file**: If a plan file was specified ($ARGUMENTS.plan_file), use it. If that argument is empty or unsubstituted, look for active plans:
    - Check `.dvx/` directory for state files
    - Look for `plans/PLAN-*.md` files
    - Check git branch name for hints (e.g., `ddanieli/implement-foo`)
-   {{/if}}
 
 2. **Read the state**:
    - Look in `.dvx/<plan-name>/state.json` for orchestration state
@@ -81,5 +76,5 @@ Or check for existing plans:
 ## Notes
 
 - This skill reads state but does not modify it
-- For detailed decision history, use `/dvx:decisions`
+- For detailed decision history, run `dvx decisions <plan>` from the CLI
 - To resume a blocked state, use `dvx run <plan>` from the CLI

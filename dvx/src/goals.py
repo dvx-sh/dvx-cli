@@ -1,12 +1,15 @@
 """
 Goal queue processing for `dvx watch`.
 
-Watches a goals directory for GOAL-*.md files and processes them one at a
-time: each goal gets its own working branch, is handed to Claude Code
-(Fable 5) via the /goal command, and is merged back into the branch that
-was active when the watcher started.
+Watches a goals directory (default .dvx/goals/) for GOAL-*.md files and
+processes them one at a time: each goal gets its own working branch, is
+handed to Claude Code (Fable 5) via the /goal command, and is merged back
+into the branch that was active when the watcher started.
 
-All state lives in .dvx/goals/state.json and is written atomically
+The watched directory lives under .dvx/ so it is created by dvx itself and
+is already gitignored - other sessions can queue work simply by dropping
+GOAL-*.md files there. Watcher state lives separately in
+.dvx/watch/state.json (outside the watched directory) and is written atomically
 (temp file + os.replace), so the watcher can be killed or crash at any
 point and `dvx watch` will recover and continue from the last completed
 step.
@@ -30,7 +33,8 @@ from state import ensure_dvx_dir, get_dvx_dir
 
 logger = logging.getLogger(__name__)
 
-GOALS_STATE_NAME = "goals"
+# Watcher state lives in .dvx/watch/, NOT in the watched .dvx/goals/ inbox.
+GOALS_STATE_NAME = "watch"
 GOALS_STATE_FILE = "state.json"
 CURRENT_GOAL_CONTENT_FILE = "current-goal.md"
 QUEUED_GOAL_SNAPSHOT_DIR = "queued-goals"
@@ -38,8 +42,12 @@ QUEUED_GOAL_SNAPSHOT_MANIFEST = "manifest.json"
 GOAL_FILE_GLOB = "GOAL-*.md"
 GOAL_MODEL = "claude-fable-5"
 GOAL_TIMEOUT_SECONDS = 4 * 60 * 60
+# The built-in /goal command caps its condition argument; passing whole goal
+# files inline trips it, so the condition references the snapshot file instead.
+GOAL_CONDITION_MAX_CHARS = 4000
+GOAL_REJECTION_SIGNATURE = "Goal condition is limited to"
 COMMIT_TIMEOUT_SECONDS = 30 * 60
-DEFAULT_GOALS_DIR = "./goals"
+DEFAULT_GOALS_DIR = ".dvx/goals"
 DEFAULT_POLL_INTERVAL = 2.0
 
 # Step statuses for the current goal. Each status names the step that has
@@ -325,10 +333,50 @@ def _ensure_branch_creation_claim(
 # Claude Code runners
 # ---------------------------------------------------------------------------
 
-def run_goal_with_claude(goal_content: str, cwd: Optional[str] = None) -> SessionResult:
+def build_goal_prompt(goal_content: str, project_dir: Optional[str] = None) -> str:
+    """
+    Build the /goal prompt for a goal session.
+
+    The /goal condition is capped at GOAL_CONDITION_MAX_CHARS, so the full goal
+    content is never passed inline. Instead the condition points at the snapshot
+    file the watcher wrote at claim time; the session reads it as its full
+    instructions. The snapshot is (re)written here so the referenced path is
+    always valid, even when recovering from partial state.
+    """
+    ensure_dvx_dir(GOALS_STATE_NAME, project_dir)
+    content_file = current_goal_content_file(project_dir)
+    content_file.write_text(goal_content)
+    return (
+        f"/goal Complete the goal specified in the file {content_file}. "
+        "Read that file first - it is the complete instruction set: requirements, "
+        "scope limits, decisions already made, verification commands, and rules. "
+        "The goal is met only when every requirement in that file is implemented "
+        "and every verification command in it passes. Do not modify anything "
+        "under .dvx/ (including that file)."
+    )
+
+
+def run_goal_with_claude(
+    goal_content: str,
+    cwd: Optional[str] = None,
+    project_dir: Optional[str] = None,
+) -> SessionResult:
     """Run Claude Code (Fable 5) with the /goal command for the goal contents."""
+    prompt = build_goal_prompt(goal_content, project_dir)
+    condition_len = len(prompt) - len("/goal ")
+    if condition_len > GOAL_CONDITION_MAX_CHARS:
+        return SessionResult(
+            output="",
+            session_id=None,
+            success=False,
+            blocked=True,
+            block_reason=(
+                f"goal condition is {condition_len} chars, over the /goal limit "
+                f"of {GOAL_CONDITION_MAX_CHARS}"
+            ),
+        )
     return run_claude(
-        prompt=f"/goal {goal_content}",
+        prompt=prompt,
         cwd=cwd,
         model=GOAL_MODEL,
         timeout=GOAL_TIMEOUT_SECONDS,
@@ -539,7 +587,7 @@ def claim_next_goal(state: GoalState, project_dir: Optional[str] = None) -> Opti
     Atomically claim the next goal in the queue as the current goal.
 
     Reviews the goal file (it must exist and be non-empty) and copies the
-    current goal contents into .dvx/goals/ so the run step can recover even if
+    current goal contents into .dvx/watch/ so the run step can recover even if
     the goal file is later deleted. Unusable goals are recorded in state.failed
     and skipped.
     """
@@ -697,6 +745,18 @@ def _step_run_claude(
         return False, guard_error
     if not result.success:
         return False, f"Claude Code failed: {result.block_reason or 'session did not succeed'}"
+    if GOAL_REJECTION_SIGNATURE in result.output:
+        return False, f"/goal rejected the goal: {result.output.strip()[:300]}"
+    if result.result_event_seen is False:
+        # A cleanly finished session always emits a result event; without one
+        # the session was cut short (rate limit, crash) and the goal cannot be
+        # trusted as done.
+        return False, "Goal session was truncated before finishing (no result event)"
+    if result.tool_use_count == 0:
+        # A goal session that never used a single tool cannot have done any
+        # work - treat it as a failure instead of silently completing.
+        summary = result.output.strip()[:300] or "<no output>"
+        return False, f"Goal session ended without doing any work (no tool use). Output: {summary}"
     return True, ""
 
 
@@ -910,7 +970,9 @@ def process_current_goal(
     The status field records the last COMPLETED step, so this can resume
     after a crash at any point. Returns (ok, error).
     """
-    claude_runner = claude_runner or run_goal_with_claude
+    if claude_runner is None:
+        def claude_runner(content):
+            return run_goal_with_claude(content, project_dir=project_dir)
     commit_runner = commit_runner or commit_logical_groups_with_claude
 
     transitions = {
@@ -954,6 +1016,17 @@ def _blocked_dirty_paths_changed(state: GoalState) -> tuple[bool, str]:
 # Watch loop
 # ---------------------------------------------------------------------------
 
+def _has_resumable_work(state: GoalState) -> bool:
+    """
+    True if saved state contains work a new watcher run must continue.
+
+    Completed/failed history does not count: an idle state file carries
+    nothing worth recovering, and its saved watch branch goes stale as soon
+    as the user switches branches.
+    """
+    return bool(state.current or state.blocked or state.queue)
+
+
 def run_goal_watch(
     start_branch: str,
     goals_dir: str = DEFAULT_GOALS_DIR,
@@ -966,18 +1039,34 @@ def run_goal_watch(
     """
     Watch the goals directory and process goals until interrupted.
 
-    Recovers from any prior state: an in-flight goal resumes at the step
-    after the last one recorded, then the queue continues. With once=True,
-    returns as soon as there is no pending work (used by tests).
+    Saved state is recovered only when it has resumable work (an in-flight,
+    blocked, or queued goal) — an idle state file from a previous run is
+    discarded so each watch starts from the branch it was launched on. An
+    in-flight goal resumes at the step after the last one recorded, then the
+    queue continues. With once=True, returns as soon as there is no pending
+    work (used by tests).
     """
     Path(goals_dir).mkdir(parents=True, exist_ok=True)
 
     state = load_goal_state(project_dir)
+    if state is not None and not _has_resumable_work(state):
+        clear_goal_state(project_dir)
+        state = None
     if state is None:
         state = GoalState(watch_branch=start_branch, goals_dir=goals_dir)
         save_goal_state(state, project_dir)
         print(f"Watch branch: {state.watch_branch}")
     else:
+        if not branch_exists(state.watch_branch):
+            print(
+                "Error: saved goal state has pending work, but its watch branch "
+                f"'{state.watch_branch}' no longer exists."
+            )
+            print(
+                "Recreate the branch to resume, or run `dvx clear` to discard "
+                "the saved state and start fresh."
+            )
+            return 1
         print(f"Recovered goal state (watch branch: {state.watch_branch})")
         if state.current:
             print(

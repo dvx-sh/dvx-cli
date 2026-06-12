@@ -38,26 +38,20 @@ The CLI does not execute tasks directly. It loads markdown skill files from `dvx
 
 ### `install.sh`
 
-Local install from a checked out repository:
+Single canonical installer. Auto-detects how it is run:
 
+- **Local clone** (`./install.sh`): detects the `dvx/` payload in the script's directory and installs from the checkout.
+- **Remote** (`curl … | bash`): downloads the GitHub archive, extracts it, and installs from that payload.
+- `--local` / `--remote` force a mode instead of auto-detecting; `--help` prints usage.
+- Pass `--dev` to also install dev dependencies (pytest, ruff).
+
+Steps in both modes:
 1. Copies `dvx/` into `~/.dvx/`
 2. Makes `~/.dvx/bin/*` executable
-3. Copies skill markdown files into `~/.claude/commands/dvx/` except template files starting with `_`
+3. Installs skill markdown files into `~/.claude/commands/dvx/` (template files starting with `_` are skipped)
 4. Runs `~/.dvx/bin/setup`
 
-Use this when working from a local clone.
-
-### `install-remote.sh`
-
-Remote install from GitHub:
-
-1. Downloads `main.tar.gz` from `https://github.com/dvx-sh/dvx-cli`
-2. Extracts it into a temporary directory
-3. Copies `dvx/` into `~/.dvx/`
-4. Makes `~/.dvx/bin/*` executable
-5. Runs `~/.dvx/bin/setup`
-
-Unlike `install.sh`, this script does not separately copy skills into `~/.claude/commands/dvx/`. Skills are still installed on CLI startup by `ensure_skills_installed()` in `dvx/src/cli.py`.
+`install-remote.sh` was deleted — its functionality was merged into `install.sh`.
 
 ### `dvx/bin/setup`
 

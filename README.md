@@ -9,17 +9,23 @@ Claude Code orchestrator that automates implement/review/test/commit cycles.
 
 ## Installation
 
+`install.sh` auto-detects how it's run: piped from curl it downloads the repo and installs; run from a local clone it installs from the checkout.
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/dvx-sh/dvx-cli/main/install-remote.sh | bash
+curl -fsSL https://raw.githubusercontent.com/dvx-sh/dvx-cli/main/install.sh | bash
 ```
 
-Or clone and install locally:
+Or clone and run the same script locally:
 
 ```bash
 git clone https://github.com/dvx-sh/dvx-cli.git
 cd dvx-cli
-./install.sh
+./install.sh           # add --dev to also install pytest, ruff, invoke
 ```
+
+Flags override auto-detection: `--local` installs from the checkout and never downloads, `--remote` always downloads the repo even from a checkout, and `--dev` also installs dev dependencies. `./install.sh --help` shows full usage.
+
+Re-running the installer replaces `~/.dvx/src` and reinstalls the Claude Code skills, so files and skills removed upstream are pruned on upgrade.
 
 Add to your shell config (~/.bashrc, ~/.zshrc, etc.):
 
@@ -31,7 +37,7 @@ export PATH="${HOME}/.dvx/bin:$PATH"
 
 ```bash
 cd ~/.dvx && source .venv/bin/activate
-pip install -e ".[dev]"        # pytest, ruff
+pip install -e ".[dev]"        # pytest, ruff, invoke
 pip install -e ".[automation]" # invoke, fabric
 pip install -e ".[ai]"         # anthropic
 ```
@@ -39,18 +45,23 @@ pip install -e ".[ai]"         # anthropic
 ## Usage
 
 ```bash
-# Generate a plan with Claude ultrathink
+# Generate a plan with Claude
 echo "Create a user authentication system" | dvx plan PLAN-auth.md
 dvx plan                       # Opens editor, Claude names the file
+dvx plan --consensus           # Planner/Architect/Critic consensus loop
 
 # Run orchestration
 dvx run PLAN-feature.md        # Run orchestration
 dvx run -s PLAN-feature.md     # Step mode: pause after each task
-dvx run --force PLAN-feature.md  # Force restart with new plan
+dvx run -f PLAN-feature.md     # Force restart with new plan
 
-dvx status                     # Show current status
-dvx decisions                  # Show decisions made
-dvx clean                      # Delete .dvx/ directory
+dvx status PLAN-feature.md     # Show current status for a plan
+dvx decisions PLAN-feature.md  # Show decisions made for a plan
+dvx clean [PLAN-feature.md]    # Delete plan state (all of .dvx/ if omitted)
+
+# Higher-level workflows
+dvx interview "task"           # Deep-interview session producing an execution-ready spec
+dvx autopilot "task"           # Sequence interview → consensus plan → run end-to-end
 ```
 
 The `run` command handles everything automatically:
@@ -58,6 +69,22 @@ The `run` command handles everything automatically:
 - **Blocked**: Launches interactive Claude session to resolve, then continues
 - **Paused** (step mode): Continues to next task
 - **Complete**: Shows completion message
+
+## Goal Watch
+
+`dvx watch` watches a goals directory (default `.dvx/goals`) for `GOAL-*.md` files and processes them one at a time: each goal gets its own branch, a headless Claude session implements it, changes are committed in logical groups, and the branch is merged back. State persists in `.dvx/watch/`, so a killed watcher resumes where it left off. `dvx clear` resets goal-processing state (the goals directory itself is untouched). See `dvx watch --help` for options.
+
+```bash
+dvx watch
+```
+
+Queue a goal from the template:
+
+```bash
+curl -s https://raw.githubusercontent.com/dvx-sh/dvx-cli/main/GOAL.md.example -o .dvx/goals/GOAL-my-change.md
+```
+
+Fill in the template's sections — the goal file is the entire prompt the implementer receives, so it must be self-contained. The filename determines the branch name (`GOAL-my-change.md` → branch `goal-my-change`).
 
 ## Claude Code Skills
 
@@ -68,7 +95,7 @@ Installing dvx also installs `/dvx:*` skills for Claude Code. Use them directly 
 /dvx:status    # Show current orchestration state
 ```
 
-The orchestration skills (implement, review, polish, finalize, etc.) are used internally by `dvx run`.
+The orchestration skills (implement, review, finalize, deslop, etc.) are used internally by `dvx run`.
 
 ## How It Works
 
@@ -83,7 +110,7 @@ The orchestration skills (implement, review, polish, finalize, etc.) are used in
 
 ## Plan Files
 
-Use `dvx plan` to generate plans with Claude ultrathink mode:
+Use `dvx plan` to generate plans with Claude:
 
 ```bash
 # Piped input with explicit filename
@@ -114,11 +141,12 @@ Add tests for...
 ## Project State
 
 dvx stores state in `.dvx/` in your project:
-- `state.json` - Current orchestration state
-- `task-status.json` - Task completion status
-- `blocked-context.md` - Context when blocked
-- `DECISIONS-*.md` - Decisions made by Claude
-- `dvx.log` - Debug log
+- `<plan-file>/state.json` - Orchestration state for that plan
+- `<plan-file>/blocked-context.md` - Context when blocked
+- `<plan-file>/DECISIONS-*.md` - Decisions made by Claude
+- `<plan-file>/dvx.log` - Debug log
+- `task-status.json` - Task completion status (all plans)
+- `watch/` - Goal watcher state
 
 ## License
 

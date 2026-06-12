@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from cli import (
     cmd_clear,
     cmd_watch,
+    ensure_skills_installed,
     find_continuation_queue,
     get_continuation_queue_path,
     is_queue_file,
@@ -379,3 +380,45 @@ class TestClearCommand:
         result = cmd_clear(SimpleNamespace())
 
         assert result == 0
+
+
+class TestEnsureSkillsInstalled:
+    """Tests for ensure_skills_installed pruning behavior."""
+
+    def test_copies_skills_and_skips_templates(self, tmp_path):
+        """Skills are copied; underscore-prefixed templates are not."""
+        skills_dir = tmp_path / "skills"
+        commands_dir = tmp_path / "commands"
+        skills_dir.mkdir()
+        (skills_dir / "implement.md").write_text("# implement\n")
+        (skills_dir / "_template.md").write_text("# template\n")
+
+        ensure_skills_installed(skills_dir=skills_dir, commands_dir=commands_dir)
+
+        assert (commands_dir / "implement.md").exists()
+        assert not (commands_dir / "_template.md").exists()
+
+    def test_prunes_skills_removed_from_package(self, tmp_path):
+        """Skills deleted from the package stop being /dvx:* commands."""
+        skills_dir = tmp_path / "skills"
+        commands_dir = tmp_path / "commands"
+        skills_dir.mkdir()
+        commands_dir.mkdir()
+        (skills_dir / "implement.md").write_text("# implement\n")
+        (commands_dir / "polish.md").write_text("# stale, deleted from package\n")
+
+        ensure_skills_installed(skills_dir=skills_dir, commands_dir=commands_dir)
+
+        assert (commands_dir / "implement.md").exists()
+        assert not (commands_dir / "polish.md").exists()
+
+    def test_missing_skills_dir_is_a_noop(self, tmp_path):
+        """No source skills means nothing is created or deleted."""
+        skills_dir = tmp_path / "skills"  # never created
+        commands_dir = tmp_path / "commands"
+        commands_dir.mkdir()
+        (commands_dir / "existing.md").write_text("# keep\n")
+
+        ensure_skills_installed(skills_dir=skills_dir, commands_dir=commands_dir)
+
+        assert (commands_dir / "existing.md").exists()
