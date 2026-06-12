@@ -1,0 +1,103 @@
+<!--
+GOAL file template for `dvx watch`.
+
+How to use:
+1. Copy this file to <goals-dir>/GOAL-<short-slug>.md (default goals dir: ./goals).
+   The filename becomes the working branch name: GOAL-add-rate-limit.md -> branch goal-add-rate-limit.
+   Use only lowercase letters, digits, and dashes in the slug, and pick a slug whose
+   goal-<slug> branch does not already exist — otherwise the watcher skips the goal as failed.
+2. Fill in every section below. Delete this comment block and any section that is
+   genuinely empty.
+3. Drop the file into the goals directory while `dvx watch` is running (or start
+   `dvx watch` afterwards). The watcher queues files in arrival order.
+
+What the implementer session is (write the goal for THIS audience):
+- The ENTIRE contents of this file are passed to a single headless Claude Code
+  (Fable 5) session via the built-in /goal command: `claude -p "/goal <this file>"`.
+  That sets the session's goal, which the harness checks is met before the session
+  may stop — so write requirements as outcomes that check can verify. Beyond that,
+  this file is all the instruction and context the implementer receives; it cannot
+  see the conversation that produced it.
+- The session is non-interactive. Nobody can answer questions, so this file must
+  pre-answer every decision. Anything left ambiguous will be decided by the
+  implementer alone.
+- The session runs at the repository root on a fresh branch (goal-<slug>) cut from
+  the branch `dvx watch` was started on. After the session, the watcher deletes this
+  goal file, commits any remaining changes in logical groups, merges the branch back
+  with --no-ff, and deletes it. Do not ask the implementer to push, open PRs, or merge.
+- The session has a 4-hour timeout. Scope the goal to comfortably fit; split larger
+  work into multiple GOAL files (they run sequentially, each on its own branch).
+-->
+
+# Goal: <one-line imperative statement of the outcome>
+
+## Why
+
+<1-3 sentences: the problem being solved and the value of solving it. This drives
+the implementer's judgment calls and commit messages.>
+
+## Current state
+
+<What exists today that the implementer must know before touching anything.
+Be concrete — name files, functions, and behaviors:>
+
+- `path/to/relevant/file.py` — <what it does and how it relates to this goal>
+- `path/to/tests/test_file.py` — <existing test coverage>
+- <Known quirks, in-flight work, or landmines in this area>
+
+## Requirements
+
+<Numbered, individually verifiable. "Add X to Y" not "improve Y".>
+
+1. <Requirement>
+2. <Requirement>
+3. <Requirement>
+
+## Out of scope
+
+<Explicitly fence off adjacent work the implementer might be tempted to do:
+refactors, renames, doc updates, dependency upgrades, etc.>
+
+- <Non-goal>
+
+## Decisions already made
+
+<Pre-answer every choice so the implementer never has to guess. Include the why
+when it affects implementation.>
+
+- <Decision>: <choice> — <rationale>
+- For any decision NOT listed here: choose the reversible, lowest-risk option,
+  note it in a code comment or commit message, and continue. Do not stop to ask.
+
+## Verification
+
+<Exact commands that must pass before the work is done. The implementer runs
+these itself — include any setup needed (venv activation, env vars, etc.).>
+
+```bash
+<command to run the test suite, e.g.: cd dvx && uv run pytest>
+<command to run the linter, e.g.: cd dvx && uv run ruff check src tests>
+```
+
+- New behavior must be covered by new or updated tests, not just existing ones.
+- All commands above must exit 0. If a failure cannot be fixed within this goal's
+  scope, fix the code you changed — never weaken, skip, or delete existing tests
+  to get to green.
+
+## Rules for the implementer (do not edit this section)
+
+- Work only on the current branch. Do NOT push, open pull requests, switch
+  branches, or merge — the watcher handles integration.
+- Do NOT create, modify, or delete anything under the goals directory (default
+  `./goals/`) or `.dvx/`. The watcher fails the goal if commits touch these paths
+  or if queued GOAL-*.md files change during the session.
+- Committing is optional: a follow-up session commits remaining changes in logical
+  groups. If you do commit, exclude the goals directory and `.dvx/`, and explain
+  why in the message, not what.
+- Leave the working tree in a state where everything you changed can be committed:
+  no stray scratch files, debug output, or half-applied edits.
+- Never ask questions — there is no one to answer. Apply the decisions above; for
+  anything else, take the reversible default and keep going.
+- If the goal is truly impossible as written (missing dependency, contradictory
+  requirements), make no speculative changes, state clearly in your final message
+  what blocked you and what is needed, and exit; failing loudly beats guessing.
