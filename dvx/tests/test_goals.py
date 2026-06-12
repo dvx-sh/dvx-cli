@@ -14,6 +14,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 import goals as goals_module
 from claude_session import SessionResult
 from goals import (
+    MERGE_FILE_NAME,
+    MERGE_STATUS_CLAIMED,
+    MERGE_STATUS_LOCAL_MERGED,
     STATUS_BRANCHED,
     STATUS_CLAIMED,
     STATUS_COMMITTED,
@@ -23,6 +26,7 @@ from goals import (
     GoalState,
     _step_create_branch,
     branch_name_for_goal,
+    claim_merge_request,
     claim_next_goal,
     clear_goal_state,
     current_goal_content_file,
@@ -30,6 +34,7 @@ from goals import (
     goals_state_file,
     load_goal_state,
     process_current_goal,
+    process_merge_request,
     queued_goal_snapshot_file,
     queued_goal_snapshot_manifest_file,
     run_goal_watch,
@@ -73,6 +78,10 @@ def fail_goal_runner(content):
 
 def fail_commit_runner(goals_dir):
     raise AssertionError("commit runner should not be called")
+
+
+def fail_merge_runner(target):
+    raise AssertionError("merge conflict runner should not be called")
 
 
 class GitRepoTestCase:
@@ -1717,3 +1726,313 @@ class TestRunGoalWatch(GitRepoTestCase):
         state = load_goal_state()
         assert state.current is None
         assert state.queue == ["GOAL-one.md"]
+
+
+class TestMergeRequest(GitRepoTestCase):
+    """MERGE control file: merge the watch branch into a remote target branch."""
+
+    def setup_remote(self, tmp_path) -> Path:
+        origin = tmp_path / "origin.git"
+        run_git(["init", "--bare", str(origin)], self.temp_dir)
+        run_git(["remote", "add", "origin", str(origin)], self.temp_dir)
+        run_git(["push", "origin", "main"], self.temp_dir)
+        run_git(["remote", "set-head", "origin", "main"], self.temp_dir)
+        return origin
+
+    def write_merge_file(self, content: str = "") -> Path:
+        merge_file = Path(self.temp_dir) / "goals" / MERGE_FILE_NAME
+        merge_file.write_text(content)
+        return merge_file
+
+    def commit_on_work(self, name="work.txt", content="work\n", message="work commit"):
+        (Path(self.temp_dir) / name).write_text(content)
+        run_git(["add", name], self.temp_dir)
+        run_git(["commit", "-m", message], self.temp_dir)
+
+    def commit_on_origin_branch(self, origin, tmp_path, branch, name, content, message):
+        """Advance a branch on the bare origin via a throwaway clone."""
+        clone = tmp_path / f"clone-{name}"
+        run_git(["clone", "--branch", branch, str(origin), str(clone)], self.temp_dir)
+        run_git(["config", "user.name", "DVX Other"], str(clone))
+        run_git(["config", "user.email", "other@example.com"], str(clone))
+        (clone / name).write_text(content)
+        run_git(["add", name], str(clone))
+        run_git(["commit", "-m", message], str(clone))
+        run_git(["push", "origin", branch], str(clone))
+        shutil.rmtree(clone, ignore_errors=True)
+
+    def test_empty_merge_file_merges_into_default_branch(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(self.temp_dir)
+        origin = self.setup_remote(tmp_path)
+        self.commit_on_work()
+        merge_file = self.write_merge_file("")
+
+        rc = run_goal_watch(
+            "work",
+            goals_dir="./goals",
+            once=True,
+            claude_runner=fail_goal_runner,
+            commit_runner=fail_commit_runner,
+            merge_runner=fail_merge_runner,
+        )
+
+        assert rc == 0
+        work_tip = run_git(["rev-parse", "work"], self.temp_dir)
+        assert run_git(["rev-parse", "main"], str(origin)) == work_tip
+        assert run_git(["rev-parse", "work"], str(origin)) == work_tip
+        assert not merge_file.exists()
+        state = load_goal_state()
+        assert state.merge is None
+        assert state.completed and state.completed[0]["merged_into"] == "origin/main"
+
+    def test_named_target_with_divergent_history_merges_cleanly(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(self.temp_dir)
+        origin = self.setup_remote(tmp_path)
+        self.commit_on_work()
+        self.commit_on_origin_branch(
+            origin, tmp_path, "main", "upstream.txt", "upstream\n", "upstream change"
+        )
+        merge_file = self.write_merge_file("main\n")
+        state = self.new_state()
+
+        claimed, error = claim_merge_request(state)
+        assert error == ""
+        assert claimed and claimed["remote"] == "origin" and claimed["target"] == "main"
+        assert not merge_file.exists()
+
+        ok, error = process_merge_request(state, merge_runner=fail_merge_runner)
+        assert ok, error
+        assert state.merge is None
+        # The watch branch now holds both histories, and origin/main matches it.
+        work_tip = run_git(["rev-parse", "work"], self.temp_dir)
+        assert run_git(["rev-parse", "main"], str(origin)) == work_tip
+        assert (Path(self.temp_dir) / "upstream.txt").exists()
+        assert (Path(self.temp_dir) / "work.txt").exists()
+        # Still on the watch branch, ready for the next goal.
+        assert run_git(["rev-parse", "--abbrev-ref", "HEAD"], self.temp_dir) == "work"
+
+    def test_merge_takes_precedence_over_queued_goals(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(self.temp_dir)
+        origin = self.setup_remote(tmp_path)
+        self.commit_on_work()
+        work_tip = run_git(["rev-parse", "work"], self.temp_dir)
+        self.add_goal("GOAL-after-merge.md")
+        self.write_merge_file("")
+
+        origin_main_when_goal_ran = {}
+
+        def implement(content):
+            origin_main_when_goal_ran["tip"] = run_git(["rev-parse", "main"], str(origin))
+            Path("feature.txt").write_text("done\n")
+
+        rc = run_goal_watch(
+            "work",
+            goals_dir="./goals",
+            once=True,
+            claude_runner=make_runner(side_effect=implement),
+            commit_runner=noop_commit_runner,
+            merge_runner=fail_merge_runner,
+        )
+
+        assert rc == 0
+        # By the time the queued goal started, the merge had already
+        # fast-forwarded origin/main to the pre-goal watch branch tip.
+        assert origin_main_when_goal_ran["tip"] == work_tip
+
+    def test_merge_conflicts_resolved_by_merge_runner(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(self.temp_dir)
+        origin = self.setup_remote(tmp_path)
+        # Both sides change README.md so the merge conflicts.
+        self.commit_on_work("README.md", "# work side\n", "work readme")
+        self.commit_on_origin_branch(
+            origin, tmp_path, "main", "README.md", "# upstream side\n", "upstream readme"
+        )
+        self.write_merge_file("main\n")
+        state = self.new_state()
+        claimed, error = claim_merge_request(state)
+        assert claimed, error
+
+        def resolve(target):
+            assert target == "origin/main"
+            Path("README.md").write_text("# merged\n")
+            run_git(["add", "README.md"], self.temp_dir)
+            run_git(["commit", "--no-edit"], self.temp_dir)
+
+        merge_runner = make_runner(side_effect=resolve)
+        ok, error = process_merge_request(state, merge_runner=merge_runner)
+
+        assert ok, error
+        assert len(merge_runner.calls) == 1
+        assert state.merge is None
+        work_tip = run_git(["rev-parse", "work"], self.temp_dir)
+        assert run_git(["rev-parse", "main"], str(origin)) == work_tip
+        assert (Path(self.temp_dir) / "README.md").read_text() == "# merged\n"
+
+    def test_unresolved_conflicts_abort_and_preserve_state(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(self.temp_dir)
+        origin = self.setup_remote(tmp_path)
+        self.commit_on_work("README.md", "# work side\n", "work readme")
+        self.commit_on_origin_branch(
+            origin, tmp_path, "main", "README.md", "# upstream side\n", "upstream readme"
+        )
+        self.write_merge_file("main\n")
+        state = self.new_state()
+        claimed, error = claim_merge_request(state)
+        assert claimed, error
+
+        # The session claims success but never resolves anything.
+        ok, error = process_merge_request(state, merge_runner=make_runner())
+
+        assert ok is False
+        assert "not fully resolved" in error
+        # The half-done merge was aborted and the request stays claimed for retry.
+        assert not goals_module._merge_in_progress()
+        assert state.merge is not None
+        assert state.merge["status"] == MERGE_STATUS_CLAIMED
+        # The abort restored the conflicted file; only the (untracked,
+        # normally gitignored) .dvx/ state dir shows up in this bare test repo.
+        porcelain = run_git(["status", "--porcelain"], self.temp_dir)
+        assert porcelain in ("", "?? .dvx/")
+        assert (Path(self.temp_dir) / "README.md").read_text() == "# work side\n"
+
+    def test_recovers_from_merge_left_in_progress(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(self.temp_dir)
+        origin = self.setup_remote(tmp_path)
+        self.commit_on_work("README.md", "# work side\n", "work readme")
+        self.commit_on_origin_branch(
+            origin, tmp_path, "main", "README.md", "# upstream side\n", "upstream readme"
+        )
+        self.write_merge_file("main\n")
+        state = self.new_state()
+        claimed, error = claim_merge_request(state)
+        assert claimed, error
+
+        # Simulate a crash mid-conflict: a merge left in progress on disk.
+        run_git(["fetch", "origin"], self.temp_dir)
+        result = subprocess.run(
+            ["git", "merge", "origin/main"],
+            cwd=self.temp_dir,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode != 0
+        assert goals_module._merge_in_progress()
+
+        def resolve(target):
+            Path("README.md").write_text("# merged\n")
+            run_git(["add", "README.md"], self.temp_dir)
+            run_git(["commit", "--no-edit"], self.temp_dir)
+
+        ok, error = process_merge_request(state, merge_runner=make_runner(side_effect=resolve))
+
+        assert ok, error
+        assert state.merge is None
+        work_tip = run_git(["rev-parse", "work"], self.temp_dir)
+        assert run_git(["rev-parse", "main"], str(origin)) == work_tip
+
+    def test_push_race_refetches_and_retries(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(self.temp_dir)
+        origin = self.setup_remote(tmp_path)
+        self.commit_on_work()
+        self.write_merge_file("main\n")
+        state = self.new_state()
+        claimed, error = claim_merge_request(state)
+        assert claimed, error
+
+        # Complete the local merge, then advance origin/main before the push -
+        # the race where another process merges to main first.
+        ok, error = goals_module._step_merge_local(state, fail_merge_runner)
+        assert ok, error
+        state.merge["status"] = MERGE_STATUS_LOCAL_MERGED
+        save_goal_state(state)
+        self.commit_on_origin_branch(
+            origin, tmp_path, "main", "racer.txt", "raced\n", "racer change"
+        )
+
+        ok, error = process_merge_request(state, merge_runner=fail_merge_runner)
+
+        assert ok, error
+        assert state.merge is None
+        # The retry picked up the racer's commit instead of clobbering it.
+        work_tip = run_git(["rev-parse", "work"], self.temp_dir)
+        assert run_git(["rev-parse", "main"], str(origin)) == work_tip
+        assert (Path(self.temp_dir) / "racer.txt").exists()
+
+    def test_multi_word_merge_file_rejected(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(self.temp_dir)
+        self.setup_remote(tmp_path)
+        merge_file = self.write_merge_file("merge into the origin/dev branch\n")
+        state = self.new_state()
+
+        claimed, error = claim_merge_request(state)
+
+        assert claimed is None and error == ""
+        assert state.merge is None
+        assert state.failed and "single branch name" in state.failed[0]["reason"]
+        assert not merge_file.exists()
+
+    def test_missing_target_branch_rejected(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(self.temp_dir)
+        self.setup_remote(tmp_path)
+        merge_file = self.write_merge_file("nope\n")
+        state = self.new_state()
+
+        claimed, error = claim_merge_request(state)
+
+        assert claimed is None and error == ""
+        assert state.failed and "branch not found on origin: nope" in state.failed[0]["reason"]
+        assert not merge_file.exists()
+
+    def test_target_equal_to_watch_branch_rejected(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(self.temp_dir)
+        self.setup_remote(tmp_path)
+        merge_file = self.write_merge_file("work\n")
+        state = self.new_state()
+
+        claimed, error = claim_merge_request(state)
+
+        assert claimed is None and error == ""
+        assert state.failed and "watch branch" in state.failed[0]["reason"]
+        assert not merge_file.exists()
+
+    def test_merge_without_remote_rejected(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        merge_file = self.write_merge_file("")
+        state = self.new_state()
+
+        claimed, error = claim_merge_request(state)
+
+        assert claimed is None and error == ""
+        assert state.failed and "requires a git remote" in state.failed[0]["reason"]
+        assert not merge_file.exists()
+
+    def test_dirty_tree_blocks_merge_claim_and_keeps_file(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(self.temp_dir)
+        self.setup_remote(tmp_path)
+        (Path(self.temp_dir) / "README.md").write_text("# dirty\n")
+        merge_file = self.write_merge_file("")
+        state = self.new_state()
+
+        claimed, error = claim_merge_request(state)
+
+        assert claimed is None and error == ""
+        assert state.merge is None
+        assert state.blocked and state.blocked["merge_file"] == MERGE_FILE_NAME
+        assert state.blocked["dirty_paths"] == ["README.md"]
+        # The request is not consumed; it retries once the tree is clean.
+        assert merge_file.exists()
+
+    def test_deleting_merge_file_clears_merge_block(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(self.temp_dir)
+        self.setup_remote(tmp_path)
+        (Path(self.temp_dir) / "README.md").write_text("# dirty\n")
+        merge_file = self.write_merge_file("")
+        state = self.new_state()
+        claim_merge_request(state)
+        assert state.blocked
+
+        merge_file.unlink()
+        claimed, error = claim_merge_request(state)
+
+        assert claimed is None and error == ""
+        assert state.blocked is None

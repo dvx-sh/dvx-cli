@@ -883,6 +883,10 @@ def cmd_watch(args) -> int:
     its remote, when one exists), and cleaned up. All state transitions are
     persisted atomically so the watcher recovers from a crash or kill at
     any point - just re-run `dvx watch`.
+
+    Dropping a MERGE file in the goals directory merges the watch branch
+    into the remote's default branch (empty file) or the branch named in
+    the file. The merge runs between goals, ahead of the queue.
     """
     ok, branch_or_error = check_watch_git_environment()
     if not ok:
@@ -1038,7 +1042,10 @@ def main() -> int:
     # watch
     watch_parser = subparsers.add_parser(
         "watch",
-        help="Watch the goals directory and process GOAL-*.md files with Claude Code",
+        help=(
+            "Watch the goals directory and process GOAL-*.md files with Claude Code "
+            "(a MERGE file there merges the watch branch into a remote branch)"
+        ),
     )
     watch_parser.add_argument(
         "--goals",
