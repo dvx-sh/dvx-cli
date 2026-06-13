@@ -5,13 +5,50 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+import orchestrator as orchestrator_module
+from claude_session import SessionResult
 from orchestrator import (
+    claude_model_override,
     is_already_complete,
     parse_decisions,
     parse_escalation_result,
     parse_finalizer_result,
     parse_review_result,
 )
+
+
+class TestClaudeModelOverride:
+    """Tests for forcing one Claude model across an orchestrator run."""
+
+    def test_override_replaces_explicit_skill_model(self, monkeypatch):
+        captured = {}
+
+        monkeypatch.setattr(orchestrator_module, "load_skill", lambda name: "Prompt")
+
+        def fake_run_claude(prompt, model=None, session_id=None, append_system_prompt=None):
+            captured["model"] = model
+            return SessionResult(output="", session_id="s", success=True)
+
+        monkeypatch.setattr(orchestrator_module, "run_claude", fake_run_claude)
+
+        with claude_model_override("custom-override-model"):
+            orchestrator_module.run_skill("finalize", {}, model="opus")
+
+        assert captured["model"] == "custom-override-model"
+
+    def test_override_applies_to_direct_claude_calls(self, monkeypatch):
+        captured = {}
+
+        def fake_run_claude(prompt, model=None):
+            captured["model"] = model
+            return SessionResult(output="", session_id="s", success=True)
+
+        monkeypatch.setattr(orchestrator_module, "run_claude", fake_run_claude)
+
+        with claude_model_override("custom-override-model"):
+            orchestrator_module.run_polish_commit()
+
+        assert captured["model"] == "custom-override-model"
 
 
 class TestParseReviewResult:

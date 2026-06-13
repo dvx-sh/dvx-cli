@@ -28,6 +28,7 @@ class TestInterviewResumePersistence:
     def test_incomplete_run_persists_session_id_for_resume(self, monkeypatch):
         launched = {}
 
+        monkeypatch.setattr("cli._check_selected_model", lambda model: (True, ""))
         monkeypatch.setattr(
             "cli.start_session",
             lambda prompt, cwd=None: SimpleNamespace(
@@ -63,6 +64,8 @@ class TestInterviewResumePersistence:
         save_interview_state(state)
 
         launched = {}
+
+        monkeypatch.setattr("cli._check_selected_model", lambda model: (True, ""))
 
         def fake_launch_interactive(**kwargs):
             launched.update(kwargs)

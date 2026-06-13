@@ -11,12 +11,15 @@ import stat
 import textwrap
 
 from claude_session import (
+    DEFAULT_CLAUDE_MODEL,
+    DVX_MODEL_ENV_VAR,
     SessionResult,
     _count_tool_uses,
     _format_tool_params,
     _parse_stream_event,
     _parse_stream_output,
     _result_is_error,
+    claude_model_override,
     run_claude,
 )
 
@@ -110,6 +113,65 @@ class TestRunClaudeStreaming:
         assert result.success is False
         assert result.blocked is True
         assert "Timeout" in result.block_reason
+
+    def test_model_override_replaces_call_specific_model(self, monkeypatch, tmp_path):
+        self._with_stub_on_path(monkeypatch, tmp_path, """
+            import json
+            import sys
+            print(json.dumps({"type": "result", "result": json.dumps(sys.argv),
+                              "session_id": "sid-model"}))
+        """)
+
+        with claude_model_override("custom-override-model"):
+            result = run_claude("hello", cwd=str(tmp_path), timeout=30, model="opus")
+
+        argv = json.loads(result.output)
+        model_index = argv.index("--model")
+        assert argv[model_index + 1] == "custom-override-model"
+        assert "opus" not in argv
+
+    def test_default_model_is_opus_48(self, monkeypatch, tmp_path):
+        self._with_stub_on_path(monkeypatch, tmp_path, """
+            import json
+            import sys
+            print(json.dumps({"type": "result", "result": json.dumps(sys.argv),
+                              "session_id": "sid-default-model"}))
+        """)
+
+        result = run_claude("hello", cwd=str(tmp_path), timeout=30)
+
+        argv = json.loads(result.output)
+        model_index = argv.index("--model")
+        assert argv[model_index + 1] == DEFAULT_CLAUDE_MODEL
+
+    def test_dvx_model_env_overrides_default(self, monkeypatch, tmp_path):
+        monkeypatch.setenv(DVX_MODEL_ENV_VAR, "env-model")
+        self._with_stub_on_path(monkeypatch, tmp_path, """
+            import json
+            import sys
+            print(json.dumps({"type": "result", "result": json.dumps(sys.argv),
+                              "session_id": "sid-env-model"}))
+        """)
+
+        result = run_claude("hello", cwd=str(tmp_path), timeout=30)
+
+        argv = json.loads(result.output)
+        model_index = argv.index("--model")
+        assert argv[model_index + 1] == "env-model"
+
+    def test_unavailable_model_error_is_clear(self, monkeypatch, tmp_path):
+        self._with_stub_on_path(monkeypatch, tmp_path, """
+            import sys
+            print("There's an issue with the selected model. It may not exist or you may not have access to it.", file=sys.stderr)
+            raise SystemExit(1)
+        """)
+
+        result = run_claude("hello", cwd=str(tmp_path), timeout=30, model="bad-model")
+
+        assert result.success is False
+        assert result.blocked is True
+        assert "bad-model" in result.block_reason
+        assert "unavailable" in result.block_reason
 
 
 class TestResultIsError:

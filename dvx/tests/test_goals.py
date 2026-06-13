@@ -12,8 +12,11 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 import goals as goals_module
-from claude_session import SessionResult
+from claude_session import DEFAULT_CLAUDE_MODEL, SessionResult
 from goals import (
+    DEFAULT_TODO_DIR,
+    ITEM_TYPE_GOAL,
+    ITEM_TYPE_RUN,
     MERGE_FILE_NAME,
     MERGE_STATUS_CLAIMED,
     MERGE_STATUS_LOCAL_MERGED,
@@ -32,12 +35,14 @@ from goals import (
     current_goal_content_file,
     enqueue_new_goals,
     goals_state_file,
+    item_type_for_file,
     load_goal_state,
     process_current_goal,
     process_merge_request,
     queued_goal_snapshot_file,
     queued_goal_snapshot_manifest_file,
     run_goal_watch,
+    run_item_with_orchestrator,
     save_goal_state,
     scan_goal_files,
 )
@@ -85,7 +90,7 @@ def fail_merge_runner(target):
 
 
 class GitRepoTestCase:
-    """Base: temp git repo on branch 'work' with a goals directory."""
+    """Base: temp git repo on branch 'work' with a watched work directory."""
 
     def setup_method(self):
         self.temp_dir = tempfile.mkdtemp()
@@ -211,13 +216,39 @@ class TestBranchNameForGoal:
 
 
 class TestQueueScanning(GitRepoTestCase):
-    def test_scan_only_matches_goal_files(self, monkeypatch):
+    @pytest.mark.parametrize(
+        ("file_name", "expected"),
+        [
+            ("GOAL.md", ITEM_TYPE_GOAL),
+            ("GOAL-do-something.md", ITEM_TYPE_GOAL),
+            ("GOALfoo.md", ITEM_TYPE_GOAL),
+            ("GOAL.txt", ITEM_TYPE_RUN),
+            ("PLAN-x.md", ITEM_TYPE_RUN),
+            ("TASK-x.md", ITEM_TYPE_RUN),
+            ("follow-these-instructions.txt", ITEM_TYPE_RUN),
+        ],
+    )
+    def test_item_type_for_file(self, file_name, expected):
+        assert item_type_for_file(file_name) == expected
+
+    def test_scan_includes_goal_and_run_files_but_not_merge_control(self, monkeypatch):
         monkeypatch.chdir(self.temp_dir)
         self.add_goal("GOAL-one.md")
-        (Path("goals") / "notes.txt").write_text("not a goal\n")
-        (Path("goals") / "PLAN-x.md").write_text("not a goal\n")
+        (Path("goals") / "notes.txt").write_text("run this\n")
+        (Path("goals") / "PLAN-x.md").write_text("plan work\n")
+        (Path("goals") / MERGE_FILE_NAME).write_text("")
+        (Path("goals") / "nested").mkdir()
+        import os
 
-        assert scan_goal_files(Path("goals")) == ["GOAL-one.md"]
+        os.utime(Path("goals") / "GOAL-one.md", (1, 1))
+        os.utime(Path("goals") / "PLAN-x.md", (2, 2))
+        os.utime(Path("goals") / "notes.txt", (3, 3))
+
+        assert scan_goal_files(Path("goals")) == [
+            "GOAL-one.md",
+            "PLAN-x.md",
+            "notes.txt",
+        ]
 
     def test_enqueue_adds_new_goals_once(self, monkeypatch):
         monkeypatch.chdir(self.temp_dir)
@@ -227,6 +258,21 @@ class TestQueueScanning(GitRepoTestCase):
         assert enqueue_new_goals(state) == ["GOAL-one.md"]
         assert enqueue_new_goals(state) == []
         assert state.queue == ["GOAL-one.md"]
+
+    def test_enqueue_keeps_saved_queue_oldest_first(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        newer = self.add_goal("GOAL-newer.md")
+        import os
+
+        os.utime(newer, (20, 20))
+        state = self.new_state()
+        enqueue_new_goals(state)
+
+        older = self.add_goal("GOAL-older.md")
+        os.utime(older, (10, 10))
+
+        assert enqueue_new_goals(state) == ["GOAL-older.md"]
+        assert state.queue == ["GOAL-older.md", "GOAL-newer.md"]
 
     def test_enqueue_skips_current_goal(self, monkeypatch):
         monkeypatch.chdir(self.temp_dir)
@@ -483,6 +529,119 @@ class TestProcessGoal(GitRepoTestCase):
         assert state.current is None
         assert [c["goal_file"] for c in state.completed] == ["GOAL-add-feature-x.md"]
         assert load_goal_state().current is None
+
+    def test_non_goal_file_runs_orchestrator_flow_inside_watch_wrapper(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        self.add_goal("TODO-add-feature-x.md", "Use the run loop.\n")
+        state = self.new_state()
+        enqueue_new_goals(state)
+        claim_next_goal(state)
+
+        assert state.current["item_type"] == ITEM_TYPE_RUN
+        calls = []
+
+        def run_runner(plan_file):
+            calls.append(plan_file)
+            snapshot = Path(plan_file)
+            assert snapshot.parent.name == goals_module.RUN_ITEM_CONTENT_DIR
+            assert snapshot.name.startswith("todo-add-feature-x-")
+            assert snapshot != current_goal_content_file()
+            assert snapshot.read_text() == "Use the run loop.\n"
+            Path("run-feature.txt").write_text("implemented by run\n")
+            return SessionResult(output="", session_id="s", success=True)
+
+        ok, error = process_current_goal(
+            state,
+            claude_runner=fail_goal_runner,
+            run_runner=run_runner,
+            commit_runner=noop_commit_runner,
+        )
+
+        assert ok, error
+        assert len(calls) == 1
+        assert run_git(["rev-parse", "--abbrev-ref", "HEAD"], self.temp_dir) == "work"
+        assert (Path(self.temp_dir) / "run-feature.txt").exists()
+        assert not (Path(self.temp_dir) / "goals" / "TODO-add-feature-x.md").exists()
+        assert run_git(["branch", "--list", "todo-add-feature-x"], self.temp_dir) == ""
+        assert state.completed[0]["goal_file"] == "TODO-add-feature-x.md"
+        assert state.completed[0]["item_type"] == ITEM_TYPE_RUN
+
+    def test_legacy_non_goal_state_migrates_to_unique_run_snapshot(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        self.add_goal("TODO-legacy.md", "Legacy run item.\n")
+        state = self.new_state()
+        enqueue_new_goals(state)
+        claim_next_goal(state)
+
+        original_content_file = Path(state.current.pop("content_file"))
+        original_content_file.unlink()
+        legacy_content_file = current_goal_content_file()
+        legacy_content_file.write_text("Legacy run item.\n")
+        save_goal_state(state)
+
+        plan_files = []
+
+        def run_runner(plan_file):
+            plan_files.append(Path(plan_file))
+            assert Path(plan_file).parent.name == goals_module.RUN_ITEM_CONTENT_DIR
+            assert Path(plan_file).name.startswith("todo-legacy-")
+            assert Path(plan_file).read_text() == "Legacy run item.\n"
+            Path("legacy-output.txt").write_text("done\n")
+            return SessionResult(output="", session_id="s", success=True)
+
+        ok, error = process_current_goal(
+            state,
+            claude_runner=fail_goal_runner,
+            run_runner=run_runner,
+            commit_runner=noop_commit_runner,
+        )
+
+        assert ok, error
+        assert len(plan_files) == 1
+        assert not legacy_content_file.exists()
+        assert (Path(self.temp_dir) / "legacy-output.txt").exists()
+
+    def test_run_flow_commits_cannot_touch_watched_inbox(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        self.add_goal("TODO-unsafe.md", "Run unsafe work.\n")
+        state = self.new_state()
+        enqueue_new_goals(state)
+        claim_next_goal(state)
+
+        def commit_watched_input(plan_file):
+            run_git(["add", "goals/TODO-unsafe.md"], self.temp_dir)
+            run_git(["commit", "-m", "bad: commit watched input"], self.temp_dir)
+            return SessionResult(output="", session_id="s", success=True)
+
+        ok, error = process_current_goal(
+            state,
+            claude_runner=fail_goal_runner,
+            run_runner=commit_watched_input,
+            commit_runner=fail_commit_runner,
+        )
+
+        assert ok is False
+        assert "excluded paths" in error
+        assert state.current["status"] == STATUS_BRANCHED
+        assert (Path(self.temp_dir) / "goals" / "TODO-unsafe.md").exists()
+
+    def test_run_item_with_orchestrator_uses_default_model(self, monkeypatch):
+        captured = {}
+
+        def fake_run_orchestrator(plan_file, model=None):
+            captured["plan_file"] = plan_file
+            captured["model"] = model
+            return 0
+
+        monkeypatch.setattr("orchestrator.run_orchestrator", fake_run_orchestrator)
+
+        result = run_item_with_orchestrator("PLAN-do-work.md")
+
+        assert result.success
+        assert captured == {
+            "plan_file": "PLAN-do-work.md",
+            "model": DEFAULT_CLAUDE_MODEL,
+        }
 
     def test_merge_pushes_watch_branch_to_origin(self, monkeypatch, tmp_path):
         monkeypatch.chdir(self.temp_dir)
@@ -1095,6 +1254,15 @@ class TestProcessGoal(GitRepoTestCase):
 
 
 class TestRunGoalWatch(GitRepoTestCase):
+    def test_default_watch_dir_is_dvx_todo(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+
+        rc = run_goal_watch("work", once=True)
+
+        assert rc == 0
+        assert Path(DEFAULT_TODO_DIR).is_dir()
+        assert load_goal_state().goals_dir == DEFAULT_TODO_DIR
+
     def test_once_with_empty_dir_returns_immediately(self, monkeypatch):
         monkeypatch.chdir(self.temp_dir)
         shutil.rmtree(Path("goals"))
@@ -1103,6 +1271,58 @@ class TestRunGoalWatch(GitRepoTestCase):
 
         assert rc == 0
         assert Path("goals").exists()
+
+    def test_continuous_watch_prints_waiting_notice_once_while_polling(
+        self,
+        monkeypatch,
+        capsys,
+    ):
+        monkeypatch.chdir(self.temp_dir)
+        sleeps = []
+
+        def stop_after_repeated_polling(interval):
+            sleeps.append(interval)
+            if len(sleeps) == 3:
+                raise RuntimeError("stop watch loop")
+
+        monkeypatch.setattr(goals_module.time, "sleep", stop_after_repeated_polling)
+
+        with pytest.raises(RuntimeError, match="stop watch loop"):
+            run_goal_watch("work", goals_dir="./goals", poll_interval=0.01, once=False)
+
+        out = capsys.readouterr().out
+        assert out.count("Watching for work files in: ./goals") == 1
+
+    def test_continuous_watch_reprints_waiting_notice_after_work_finishes(
+        self,
+        monkeypatch,
+        capsys,
+    ):
+        monkeypatch.chdir(self.temp_dir)
+        sleeps = []
+
+        def add_work_then_stop(interval):
+            sleeps.append(interval)
+            if len(sleeps) == 1:
+                self.add_goal("GOAL-one.md", "One goal.\n")
+            elif len(sleeps) == 2:
+                raise RuntimeError("stop watch loop")
+
+        monkeypatch.setattr(goals_module.time, "sleep", add_work_then_stop)
+
+        with pytest.raises(RuntimeError, match="stop watch loop"):
+            run_goal_watch(
+                "work",
+                goals_dir="./goals",
+                poll_interval=0.01,
+                once=False,
+                claude_runner=make_runner(),
+                commit_runner=noop_commit_runner,
+            )
+
+        out = capsys.readouterr().out
+        assert out.count("Watching for work files in: ./goals") == 2
+        assert "Item complete and merged into work." in out
 
     def test_processes_all_pending_goals_in_order(self, monkeypatch):
         monkeypatch.chdir(self.temp_dir)
@@ -1136,6 +1356,110 @@ class TestRunGoalWatch(GitRepoTestCase):
         assert [c["goal_file"] for c in state.completed] == ["GOAL-first.md", "GOAL-second.md"]
         assert scan_goal_files(Path("goals")) == []
         assert run_git(["rev-parse", "--abbrev-ref", "HEAD"], self.temp_dir) == "work"
+
+    def test_processes_oldest_file_before_saved_newer_queue_item(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        newer = self.add_goal("GOAL-newer.md", "Newer goal.\n")
+        import os
+
+        os.utime(newer, (20, 20))
+        state = self.new_state()
+        state.queue = ["GOAL-newer.md"]
+        save_goal_state(state)
+
+        older = self.add_goal("GOAL-older.md", "Older goal.\n")
+        os.utime(older, (10, 10))
+
+        order = []
+
+        def implement(content):
+            order.append(content.strip())
+            Path(f"out-{len(order)}.txt").write_text(content)
+
+        rc = run_goal_watch(
+            "work",
+            goals_dir="./goals",
+            once=True,
+            claude_runner=make_runner(side_effect=implement),
+            commit_runner=noop_commit_runner,
+        )
+
+        assert rc == 0
+        assert order == ["Older goal.", "Newer goal."]
+        state = load_goal_state()
+        assert [c["goal_file"] for c in state.completed] == ["GOAL-older.md", "GOAL-newer.md"]
+
+    def test_watch_dispatches_goal_files_to_goal_and_other_files_to_run(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        self.add_goal("GOAL-first.md", "First goal.\n")
+        self.add_goal("TODO-second.md", "Second run item.\n")
+        import os
+
+        os.utime(Path("goals") / "GOAL-first.md", (1, 1))
+        os.utime(Path("goals") / "TODO-second.md", (2, 2))
+
+        goal_seen = []
+        run_seen = []
+
+        def implement_goal(content):
+            goal_seen.append(content.strip())
+            Path("goal-output.txt").write_text("goal flow\n")
+
+        def run_item(plan_file):
+            run_seen.append(Path(plan_file).read_text().strip())
+            Path("run-output.txt").write_text("run flow\n")
+            return SessionResult(output="", session_id="s", success=True)
+
+        rc = run_goal_watch(
+            "work",
+            goals_dir="./goals",
+            once=True,
+            claude_runner=make_runner(side_effect=implement_goal),
+            run_runner=run_item,
+            commit_runner=noop_commit_runner,
+        )
+
+        assert rc == 0
+        assert goal_seen == ["First goal."]
+        assert run_seen == ["Second run item."]
+        assert (Path(self.temp_dir) / "goal-output.txt").exists()
+        assert (Path(self.temp_dir) / "run-output.txt").exists()
+        state = load_goal_state()
+        assert [c["item_type"] for c in state.completed] == [ITEM_TYPE_GOAL, ITEM_TYPE_RUN]
+        assert scan_goal_files(Path("goals")) == []
+
+    def test_non_goal_watch_items_get_distinct_run_state_paths(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        self.add_goal("TODO-first.md", "First run item.\n")
+        self.add_goal("PLAN-second.md", "Second run item.\n")
+        import os
+
+        os.utime(Path("goals") / "TODO-first.md", (1, 1))
+        os.utime(Path("goals") / "PLAN-second.md", (2, 2))
+
+        plan_files = []
+
+        def run_item(plan_file):
+            plan_files.append(Path(plan_file))
+            Path(f"run-output-{len(plan_files)}.txt").write_text(Path(plan_file).read_text())
+            return SessionResult(output="", session_id="s", success=True)
+
+        rc = run_goal_watch(
+            "work",
+            goals_dir="./goals",
+            once=True,
+            claude_runner=fail_goal_runner,
+            run_runner=run_item,
+            commit_runner=noop_commit_runner,
+        )
+
+        assert rc == 0
+        assert len(plan_files) == 2
+        assert plan_files[0].parent.name == goals_module.RUN_ITEM_CONTENT_DIR
+        assert plan_files[1].parent.name == goals_module.RUN_ITEM_CONTENT_DIR
+        assert plan_files[0].name != plan_files[1].name
+        state = load_goal_state()
+        assert [c["item_type"] for c in state.completed] == [ITEM_TYPE_RUN, ITEM_TYPE_RUN]
 
     def test_queued_goal_content_change_during_runner_blocks_without_overwrite(self, monkeypatch):
         monkeypatch.chdir(self.temp_dir)
@@ -1230,7 +1554,7 @@ class TestRunGoalWatch(GitRepoTestCase):
         )
 
         assert ok is False
-        assert "Queued goals changed" in error
+        assert "Queued items changed" in error
         assert runner.calls == []
         assert (Path("goals") / "GOAL-second.md").read_text() == "Corrupted before crash.\n"
         assert queued_goal_snapshot_file("GOAL-second.md").read_text() == "Second goal original.\n"
@@ -1467,7 +1791,7 @@ class TestRunGoalWatch(GitRepoTestCase):
         )
 
         assert ok is False
-        assert "Queued goals changed" in error
+        assert "Queued items changed" in error
         assert recovered.current["status"] == STATUS_GOAL_DELETED
         assert run_git(["rev-parse", "--abbrev-ref", "HEAD"], self.temp_dir) == "goal-first"
         assert (Path("goals") / "GOAL-second.md").read_text() == "Corrupted by commit runner.\n"
@@ -1494,7 +1818,7 @@ class TestRunGoalWatch(GitRepoTestCase):
         assert (Path(self.temp_dir) / "goals" / "GOAL-noop.md").exists()
         assert Path("local.txt").read_text() == "user work before watcher\n"
 
-    def test_once_blocks_tracked_rename_into_goals_without_running_goal(self, monkeypatch):
+    def test_once_blocks_tracked_rename_into_goals_without_running_item(self, monkeypatch):
         monkeypatch.chdir(self.temp_dir)
         Path("tracked.txt").write_text("tracked user work\n")
         run_git(["add", "tracked.txt"], self.temp_dir)
@@ -1513,7 +1837,7 @@ class TestRunGoalWatch(GitRepoTestCase):
         assert rc == 1
         state = load_goal_state()
         assert state.current is None
-        assert state.queue == ["GOAL-noop.md"]
+        assert state.queue == ["tracked.txt", "GOAL-noop.md"]
         assert state.blocked["dirty_paths"] == ["tracked.txt"]
         assert (Path(self.temp_dir) / "goals" / "GOAL-noop.md").exists()
         assert (Path(self.temp_dir) / "goals" / "tracked.txt").read_text() == "tracked user work\n"
@@ -1601,7 +1925,7 @@ class TestRunGoalWatch(GitRepoTestCase):
             )
 
         out = capsys.readouterr().out
-        assert out.count("Blocked goal GOAL-noop.md") == 1
+        assert out.count("Blocked item GOAL-noop.md") == 1
         state = load_goal_state()
         assert state.blocked is None
         assert [c["goal_file"] for c in state.completed] == ["GOAL-noop.md"]
@@ -1611,7 +1935,7 @@ class TestRunGoalWatch(GitRepoTestCase):
         state = self.new_state()
         state.blocked = {
             "goal_file": "GOAL-noop.md",
-            "reason": "working tree is dirty outside goals and .dvx",
+            "reason": "working tree is dirty outside the watched directory and .dvx",
             "dirty_paths": ["b.txt", "a.txt"],
         }
         monkeypatch.setattr(goals_module, "_dirty_paths", lambda goals_dir: ["a.txt", "b.txt"])

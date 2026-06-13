@@ -10,10 +10,113 @@ import logging
 import os
 import subprocess
 import threading
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_CLAUDE_MODEL = "claude-opus-4-8"
+DVX_MODEL_ENV_VAR = "DVX_MODEL"
+MODEL_CHECK_PROMPT = "Reply with exactly OK."
+MODEL_CHECK_TIMEOUT_SECONDS = 60
+
+_CLAUDE_MODEL_OVERRIDE: ContextVar[Optional[str]] = ContextVar(
+    "_CLAUDE_MODEL_OVERRIDE",
+    default=None,
+)
+
+
+def _normalize_model(model: Optional[str]) -> Optional[str]:
+    if model is None:
+        return None
+    model = model.strip()
+    return model or None
+
+
+def resolve_command_model(model: Optional[str] = None) -> str:
+    """Resolve user-facing model precedence: CLI flag, DVX_MODEL, default."""
+    return (
+        _normalize_model(model)
+        or _normalize_model(os.environ.get(DVX_MODEL_ENV_VAR))
+        or DEFAULT_CLAUDE_MODEL
+    )
+
+
+@contextmanager
+def claude_model_override(model: Optional[str]):
+    """Temporarily force all Claude CLI launches in this context to use one model."""
+    model = _normalize_model(model)
+    if model is None:
+        yield
+        return
+    token = _CLAUDE_MODEL_OVERRIDE.set(model)
+    try:
+        yield
+    finally:
+        _CLAUDE_MODEL_OVERRIDE.reset(token)
+
+
+def resolve_claude_model(model: Optional[str] = None) -> str:
+    """Resolve the model for an individual Claude CLI launch."""
+    return (
+        _normalize_model(_CLAUDE_MODEL_OVERRIDE.get())
+        or _normalize_model(model)
+        or _normalize_model(os.environ.get(DVX_MODEL_ENV_VAR))
+        or DEFAULT_CLAUDE_MODEL
+    )
+
+
+def _looks_like_model_unavailable(detail: str) -> bool:
+    text = detail.lower()
+    return any(
+        marker in text
+        for marker in (
+            "issue with the selected model",
+            "may not exist or you may not have access",
+            "model does not exist",
+            "unknown model",
+            "invalid model",
+            "model_not_found",
+        )
+    )
+
+
+def _claude_failure_reason(retcode: int, model: str, stderr_output: str, text_output: str) -> str:
+    detail = (stderr_output.strip() or text_output.strip() or "unknown error").strip()
+    if _looks_like_model_unavailable(detail):
+        return (
+            f"Claude model '{model}' is unavailable in this Claude CLI session. "
+            f"Set --model or {DVX_MODEL_ENV_VAR} to an available model. Details: {detail}"
+        )
+    return f"claude exited with status {retcode}: {detail}"
+
+
+def check_claude_model_available(
+    model: Optional[str] = None,
+    cwd: Optional[str] = None,
+    timeout: int = MODEL_CHECK_TIMEOUT_SECONDS,
+) -> tuple[bool, str]:
+    """Run a minimal Claude request so commands fail before mutating state."""
+    selected = resolve_command_model(model)
+    with claude_model_override(selected):
+        result = run_claude(
+            MODEL_CHECK_PROMPT,
+            cwd=cwd,
+            timeout=timeout,
+            model=selected,
+            disable_tools=True,
+        )
+    if result.success:
+        return True, ""
+    reason = result.block_reason or result.output.strip() or "Claude CLI model check failed"
+    return (
+        False,
+        f"Claude model '{selected}' is not available. "
+        f"Use --model <model> or {DVX_MODEL_ENV_VAR}=<model> to choose an available model. "
+        f"Details: {reason}",
+    )
 
 
 @dataclass
@@ -231,6 +334,7 @@ def run_claude(
         SessionResult with output, session_id, and status
     """
     cwd = cwd or os.getcwd()
+    model = resolve_claude_model(model)
 
     cmd = ['claude', '--dangerously-skip-permissions', '--output-format', 'stream-json', '--verbose']
 
@@ -313,12 +417,20 @@ def run_claude(
         if is_error:
             logger.warning("Claude result event reported an error despite session ending")
 
+        failure_reason = None
+        if retcode != 0:
+            failure_reason = _claude_failure_reason(retcode, model, stderr_output, text)
+
         return SessionResult(
             output=text,
             session_id=sid or session_id,  # Keep existing if not returned
             success=retcode == 0 and not is_error,
-            blocked=blocked,
-            block_reason=block_reason or ("session result reported an error" if is_error else None),
+            blocked=blocked or failure_reason is not None,
+            block_reason=(
+                block_reason
+                or failure_reason
+                or ("session result reported an error" if is_error else None)
+            ),
             tool_use_count=_count_tool_uses(stream_events),
             result_event_seen=any(
                 isinstance(e, dict) and e.get('type') == 'result' for e in stream_events
@@ -375,6 +487,7 @@ def launch_interactive(
     initial_prompt: Optional[str] = None,
     plan_file: Optional[str] = None,
     auto_explain: bool = True,
+    model: Optional[str] = None,
 ) -> None:
     """
     Launch Claude Code in interactive mode for human intervention.
@@ -385,12 +498,16 @@ def launch_interactive(
         initial_prompt: Optional prompt to start the session with
         plan_file: Optional plan file path for resume instructions
         auto_explain: If True, Claude will immediately explain the blocking reason
+        model: Optional model override for the interactive Claude session
 
     This blocks until the user exits the session.
     """
     cwd = cwd or os.getcwd()
+    model = resolve_claude_model(model)
 
     cmd = ['claude', '--dangerously-skip-permissions']
+    if model:
+        cmd.extend(['--model', model])
     if session_id:
         cmd.extend(['--resume', session_id])
     if initial_prompt:

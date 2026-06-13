@@ -27,7 +27,13 @@ from autopilot import (
 from autopilot import (
     summarize as summarize_autopilot,
 )
-from claude_session import launch_interactive, start_session
+from claude_session import (
+    check_claude_model_available,
+    claude_model_override,
+    launch_interactive,
+    resolve_command_model,
+    start_session,
+)
 from consensus import (
     MAX_ITERATIONS,
     make_skill_caller,
@@ -37,8 +43,8 @@ from consensus import (
 )
 from context import load_latest_content, slug_from, slug_from_plan_file
 from goals import (
-    DEFAULT_GOALS_DIR,
     DEFAULT_POLL_INTERVAL,
+    DEFAULT_TODO_DIR,
     clear_goal_state,
     run_goal_watch,
 )
@@ -81,6 +87,14 @@ from state import (
 
 # Skills directory in the package
 SKILLS_DIR = Path(__file__).parent / "skills"
+
+
+def _selected_model_from_args(args) -> str:
+    return resolve_command_model(getattr(args, "model", None))
+
+
+def _check_selected_model(model: str) -> tuple[bool, str]:
+    return check_claude_model_available(model)
 
 
 def ensure_skills_installed(
@@ -171,6 +185,12 @@ def cmd_plan(args) -> int:
         print("Error: No input provided.")
         return 1
 
+    model = _selected_model_from_args(args)
+    ok, error = _check_selected_model(model)
+    if not ok:
+        print(f"Error: {error}")
+        return 1
+
     print("Generating plan with Claude...")
     print()
 
@@ -210,7 +230,7 @@ def cmd_plan(args) -> int:
         print(f"Running consensus planning (up to {MAX_ITERATIONS} iterations)...")
         print()
 
-        skill_caller = make_skill_caller(run_skill, model="opus")
+        skill_caller = make_skill_caller(run_skill, model=model)
         try:
             result = run_consensus(
                 task=user_input,
@@ -242,14 +262,14 @@ def cmd_plan(args) -> int:
             "plan_file": plan_file,
             "changes": user_input,
             "existing_content": existing_content,
-        }, model="opus")
+        }, model=model)
     else:
         result = run_skill("create-plan", {
             "requirements": user_input,
             "output_file": plan_file or "",
             "snapshot_content": snapshot_content,
             "interview_spec": interview_spec_content,
-        }, model="opus")
+        }, model=model)
 
     if not result.success:
         print(f"Error: Claude failed - {result.block_reason or 'unknown error'}")
@@ -296,6 +316,7 @@ def _autopilot_interview_phase(plan: AutopilotPlan, project_dir: Optional[str]) 
         task=plan.task,
         profile="standard",
         slug=plan.slug,
+        model=getattr(plan, "model", None),
     )
     print("[autopilot] phase: interview")
     return cmd_interview(interview_args)
@@ -312,6 +333,7 @@ def _autopilot_planning_phase(plan: AutopilotPlan, project_dir: Optional[str]) -
         plan_file=plan.plan_file,
         snapshot=None,
         consensus=not plan.skip_consensus,
+        model=getattr(plan, "model", None),
     )
 
     # cmd_plan reads from stdin for requirements when there is no interview
@@ -336,6 +358,7 @@ def _autopilot_running_phase(plan: AutopilotPlan, project_dir: Optional[str]) ->
         force=False,
         step=False,
         no_deslop=plan.no_deslop,
+        model=getattr(plan, "model", None),
     )
     print("[autopilot] phase: running")
     return cmd_run(run_args)
@@ -363,6 +386,7 @@ def cmd_autopilot(args) -> int:
         no_deslop=getattr(args, "no_deslop", False),
         explicit_plan_file=getattr(args, "plan_file", None),
         resume_slug=resume_slug,
+        model=getattr(args, "model", None),
     )
 
     print(f"[autopilot] task: {plan.task}")
@@ -406,6 +430,11 @@ def cmd_interview(args) -> int:
 
     slug = args.slug or slug_from(task)
     project_dir: Optional[str] = None
+    model = _selected_model_from_args(args)
+    ok, error = _check_selected_model(model)
+    if not ok:
+        print(f"Error: {error}")
+        return 1
 
     state = load_interview_state(slug, project_dir)
     if state is None:
@@ -450,7 +479,8 @@ def cmd_interview(args) -> int:
 
     interview_session_id = state.session_id
     if not interview_session_id:
-        seed = start_session(prompt, cwd=project_dir)
+        with claude_model_override(model):
+            seed = start_session(prompt, cwd=project_dir)
         if not seed.success or not seed.session_id:
             reason = seed.block_reason or "failed to create interview session"
             print(f"Error: {reason}")
@@ -470,6 +500,7 @@ def cmd_interview(args) -> int:
         initial_prompt=None,
         plan_file=None,
         auto_explain=False,
+        model=model,
     )
 
     print()
@@ -650,14 +681,19 @@ def find_continuation_queue(plan_file: str) -> Optional[str]:
     return None
 
 
-def run_with_continuation(plan_file: str, step_mode: bool = False, no_deslop: bool = False) -> int:
+def run_with_continuation(
+    plan_file: str,
+    step_mode: bool = False,
+    no_deslop: bool = False,
+    model: Optional[str] = None,
+) -> int:
     """
     Run orchestrator and handle continuation queue on success.
 
     If the plan completes successfully and there's a continuation queue,
     re-exec dvx to process the next plan in the queue.
     """
-    result = run_orchestrator(plan_file, step_mode=step_mode, no_deslop=no_deslop)
+    result = run_orchestrator(plan_file, step_mode=step_mode, no_deslop=no_deslop, model=model)
 
     if result == 0:
         # Plan completed successfully - check for continuation
@@ -673,12 +709,27 @@ def run_with_continuation(plan_file: str, step_mode: bool = False, no_deslop: bo
             # Re-exec ourselves with the continuation queue
             # Using os.execv replaces this process entirely
             python = sys.executable
-            os.execv(python, [python, __file__, 'run', continuation])
+            argv = [python, __file__, 'run']
+            if model:
+                argv.extend(['--model', model])
+            argv.append(continuation)
+            os.execv(python, argv)
 
     return result
 
 
 def cmd_run(args) -> int:
+    """Run orchestration with command/env/default model resolution."""
+    model = _selected_model_from_args(args)
+    ok, error = _check_selected_model(model)
+    if not ok:
+        print(f"Error: {error}")
+        return 1
+    with claude_model_override(model):
+        return _cmd_run_with_model(args, model)
+
+
+def _cmd_run_with_model(args, model: str) -> int:
     """
     Run orchestration - handles all states automatically.
 
@@ -776,7 +827,7 @@ def cmd_run(args) -> int:
         initial_prompt = initial_prompt.replace("$ARGUMENTS.blocked_reason", "See context below")
         initial_prompt = initial_prompt.replace("$ARGUMENTS.context", blocked_context)
 
-        launch_interactive(initial_prompt=initial_prompt, plan_file=plan_file)
+        launch_interactive(initial_prompt=initial_prompt, plan_file=plan_file, model=model)
 
         print()
         print("Interactive session ended.")
@@ -792,7 +843,12 @@ def cmd_run(args) -> int:
         if sync_result['synced'] > 0 or sync_result['added'] > 0:
             print(f"  Updated: {sync_result['synced']} synced, {sync_result['added']} added from plan markers")
 
-        return run_with_continuation(state.plan_file, step_mode=state.step_mode, no_deslop=no_deslop)
+        return run_with_continuation(
+            state.plan_file,
+            step_mode=state.step_mode,
+            no_deslop=no_deslop,
+            model=model,
+        )
 
     # === PLANNER: Sync state with plan file ===
     # This ensures the status tracking file matches the plan's [x] markers.
@@ -829,14 +885,24 @@ def cmd_run(args) -> int:
         print("=" * 60)
         print()
 
-        return run_with_continuation(plan_file, step_mode=step_mode, no_deslop=no_deslop)
+        return run_with_continuation(
+            plan_file,
+            step_mode=step_mode,
+            no_deslop=no_deslop,
+            model=model,
+        )
 
     elif state.phase == Phase.PAUSED.value:
         print(f"Resuming from step-mode pause: {state.plan_file}")
         print()
 
         update_phase(Phase.IDLE, plan_file)
-        return run_with_continuation(state.plan_file, step_mode=state.step_mode, no_deslop=no_deslop)
+        return run_with_continuation(
+            state.plan_file,
+            step_mode=state.step_mode,
+            no_deslop=no_deslop,
+            model=model,
+        )
 
     elif state.phase == Phase.COMPLETE.value:
         print(f"Plan already complete: {state.plan_file}")
@@ -854,7 +920,11 @@ def cmd_run(args) -> int:
             print()
 
             python = sys.executable
-            os.execv(python, [python, __file__, 'run', continuation])
+            argv = [python, __file__, 'run']
+            if model:
+                argv.extend(['--model', model])
+            argv.append(continuation)
+            os.execv(python, argv)
 
         return 0
 
@@ -870,37 +940,51 @@ def cmd_run(args) -> int:
             print("Step mode enabled")
             print()
 
-        return run_with_continuation(state.plan_file, step_mode=state.step_mode, no_deslop=no_deslop)
+        return run_with_continuation(
+            state.plan_file,
+            step_mode=state.step_mode,
+            no_deslop=no_deslop,
+            model=model,
+        )
 
 
 def cmd_watch(args) -> int:
     """
-    Watch the goals directory and process GOAL-*.md files one at a time.
+    Watch the work directory and process files one at a time.
 
-    Each goal is queued in .dvx/watch/state.json, worked on its own branch
-    by Claude Code (Fable 5, /goal command), committed in logical groups,
-    merged back into the branch watch started on (which is then pushed to
-    its remote, when one exists), and cleaned up. All state transitions are
-    persisted atomically so the watcher recovers from a crash or kill at
-    any point - just re-run `dvx watch`.
+    Each watched file is queued in .dvx/watch/state.json and worked on in its
+    own branch by Claude Code. GOAL*.md files use the /goal command;
+    all other files use the same loop as `dvx run`. Changes are committed,
+    merged back into the branch watch started on (which is then pushed to its
+    remote, when one exists), and cleaned up. All state transitions are
+    persisted atomically so the watcher recovers from a crash or kill at any
+    point - just re-run `dvx watch`.
 
-    Dropping a MERGE file in the goals directory merges the watch branch
+    Dropping a MERGE file in the watched directory merges the watch branch
     into the remote's default branch (empty file) or the branch named in
-    the file. The merge runs between goals, ahead of the queue.
+    the file. The merge runs between watched items, ahead of the queue.
     """
     ok, branch_or_error = check_watch_git_environment()
     if not ok:
         print(f"Error: {branch_or_error}")
         return 1
 
+    model = _selected_model_from_args(args)
+    ok, error = _check_selected_model(model)
+    if not ok:
+        print(f"Error: {error}")
+        return 1
+
     print("Press Ctrl-C to stop.")
     try:
-        return run_goal_watch(
-            start_branch=branch_or_error,
-            goals_dir=args.goals,
-            poll_interval=args.poll_interval,
-            once=args.once,
-        )
+        with claude_model_override(model):
+            return run_goal_watch(
+                start_branch=branch_or_error,
+                goals_dir=args.goals,
+                poll_interval=args.poll_interval,
+                once=args.once,
+                model=model,
+            )
     except KeyboardInterrupt:
         print()
         print("Watch stopped. Re-run `dvx watch` to continue where it left off.")
@@ -909,15 +993,15 @@ def cmd_watch(args) -> int:
 
 def cmd_clear(args) -> int:
     """
-    Clear all goal-processing state, leaving the goals directory untouched.
+    Clear all watch-processing state, leaving the watched directory untouched.
 
-    Running `dvx watch` afterwards re-discovers the goal files and starts
+    Running `dvx watch` afterwards re-discovers the work files and starts
     processing them from scratch.
     """
     if clear_goal_state():
-        print("Cleared goal state (.dvx/watch/). Goal files were left in place.")
+        print("Cleared watch state (.dvx/watch/). Work files were left in place.")
     else:
-        print("No goal state to clear.")
+        print("No watch state to clear.")
     return 0
 
 
@@ -1037,38 +1121,53 @@ def main() -> int:
     run_parser.add_argument("-f", "--force", action="store_true", help="Force restart with new plan file")
     run_parser.add_argument("-s", "--step", action="store_true", help="Step mode: pause after each task for review")
     run_parser.add_argument("--no-deslop", action="store_true", help="Skip the post-approval deslop cleanup pass")
+    run_parser.add_argument(
+        "--model",
+        help="Claude model to use (overrides DVX_MODEL; default: claude-opus-4-8)",
+    )
     run_parser.set_defaults(func=cmd_run)
 
     # watch
     watch_parser = subparsers.add_parser(
         "watch",
         help=(
-            "Watch the goals directory and process GOAL-*.md files with Claude Code "
+            "Watch a work directory and process GOAL*.md via /goal, other files via dvx run "
             "(a MERGE file there merges the watch branch into a remote branch)"
         ),
     )
     watch_parser.add_argument(
+        "--todo",
+        dest="goals",
+        default=DEFAULT_TODO_DIR,
+        help=f"Directory to watch for work files (default: {DEFAULT_TODO_DIR})",
+    )
+    watch_parser.add_argument(
         "--goals",
-        default=DEFAULT_GOALS_DIR,
-        help=f"Directory to watch for GOAL-*.md files (default: {DEFAULT_GOALS_DIR})",
+        dest="goals",
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
     )
     watch_parser.add_argument(
         "--poll-interval",
         type=float,
         default=DEFAULT_POLL_INTERVAL,
-        help="Seconds between checks for new goal files",
+        help="Seconds between checks for new work files",
     )
     watch_parser.add_argument(
         "--once",
         action="store_true",
-        help="Process pending goals and exit instead of waiting for new ones",
+        help="Process pending work files and exit instead of waiting for new ones",
+    )
+    watch_parser.add_argument(
+        "--model",
+        help="Claude model to use (overrides DVX_MODEL; default: claude-opus-4-8)",
     )
     watch_parser.set_defaults(func=cmd_watch)
 
     # clear
     clear_parser = subparsers.add_parser(
         "clear",
-        help="Clear goal-processing state (leaves the goals directory untouched)",
+        help="Clear watch-processing state (leaves the watched directory untouched)",
     )
     clear_parser.set_defaults(func=cmd_clear)
 
@@ -1122,6 +1221,10 @@ def main() -> int:
         "--resume",
         help="Resume an in-progress autopilot run by slug",
     )
+    autopilot_parser.add_argument(
+        "--model",
+        help="Claude model to use for all autopilot phases (overrides DVX_MODEL; default: claude-opus-4-8)",
+    )
     autopilot_parser.set_defaults(func=cmd_autopilot)
 
     # interview
@@ -1156,6 +1259,10 @@ def main() -> int:
         "--slug",
         help="Override the auto-derived slug for state and spec filenames",
     )
+    interview_parser.add_argument(
+        "--model",
+        help="Claude model to use (overrides DVX_MODEL; default: claude-opus-4-8)",
+    )
     interview_parser.set_defaults(func=cmd_interview, profile="standard")
 
     # plan
@@ -1169,6 +1276,10 @@ def main() -> int:
         "--consensus",
         action="store_true",
         help="Run Planner/Architect/Critic consensus loop (up to 5 iterations)",
+    )
+    plan_parser.add_argument(
+        "--model",
+        help="Claude model to use (overrides DVX_MODEL; default: claude-opus-4-8)",
     )
     plan_parser.set_defaults(func=cmd_plan)
 

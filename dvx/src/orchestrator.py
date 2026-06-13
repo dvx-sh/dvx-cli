@@ -9,7 +9,7 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
-from claude_session import SessionResult, run_claude
+from claude_session import SessionResult, claude_model_override, resolve_claude_model, run_claude
 from plan_parser import (
     Task,
     TaskStatus,
@@ -37,6 +37,10 @@ logger = logging.getLogger(__name__)
 
 # Path to skills directory
 SKILLS_DIR = Path(__file__).parent / "skills"
+
+
+def _resolve_claude_model(model: Optional[str] = None) -> Optional[str]:
+    return resolve_claude_model(model)
 
 
 def parse_decisions(output: str) -> list[dict]:
@@ -134,7 +138,7 @@ def run_skill(
 
     return run_claude(
         content,
-        model=model,
+        model=_resolve_claude_model(model),
         session_id=session_id,
         append_system_prompt=append_system_prompt,
     )
@@ -405,7 +409,7 @@ Important:
 - Include the full description for each subtask
 """
 
-    return run_claude(prompt)
+    return run_claude(prompt, model=_resolve_claude_model())
 
 
 def run_implementer(task: Task, plan_file: str, feedback: Optional[str] = None) -> SessionResult:
@@ -719,7 +723,7 @@ def run_polish_fix(suggestions: str, plan_file: str) -> SessionResult:
 - Deferred work: create FIX files to capture the improvements for later
 """
 
-    return run_claude(prompt)
+    return run_claude(prompt, model=_resolve_claude_model())
 
 
 def run_polish_commit() -> SessionResult:
@@ -745,7 +749,7 @@ polish: address review suggestions
 IMPORTANT: Leave plans/FIX-*.md files unstaged. The user will review these and decide whether to implement them now or later.
 """
 
-    return run_claude(prompt)
+    return run_claude(prompt, model=_resolve_claude_model())
 
 
 def run_finalizer(plan_file: str) -> SessionResult:
@@ -878,7 +882,7 @@ The plan file is: {plan_file}
 Focus on addressing the specific issues listed above. Do not make unrelated changes.
 """
 
-    return run_claude(prompt)
+    return run_claude(prompt, model=_resolve_claude_model())
 
 
 CHANGED_FILES_MANIFEST = "changed-files.txt"
@@ -1339,7 +1343,12 @@ def handle_blocked(state: State, reason: str, context: str, session_id: Optional
     return 1  # Exit with error to signal blocked state
 
 
-def run_orchestrator(plan_file: str, step_mode: bool = False, no_deslop: bool = False) -> int:
+def run_orchestrator(
+    plan_file: str,
+    step_mode: bool = False,
+    no_deslop: bool = False,
+    model: Optional[str] = None,
+) -> int:
     """
     Main orchestration loop.
 
@@ -1347,11 +1356,14 @@ def run_orchestrator(plan_file: str, step_mode: bool = False, no_deslop: bool = 
         plan_file: Path to the plan file
         step_mode: If True, pause after each task completion for review
         no_deslop: If True, skip the post-approval deslop cleanup pass
+        model: Optional model override for every Claude call in this run
 
     Returns: 0 on success/completion, 1 on error/blocked/paused
     """
     try:
-        return _run_orchestrator_inner(plan_file, step_mode, no_deslop=no_deslop)
+        selected_model = resolve_claude_model(model)
+        with claude_model_override(selected_model):
+            return _run_orchestrator_inner(plan_file, step_mode, no_deslop=no_deslop)
     except KeyboardInterrupt:
         logger.info("Interrupted by user")
         print(f"\nInterrupted. Run 'dvx run {plan_file}' to resume.")
