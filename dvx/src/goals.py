@@ -1,7 +1,7 @@
 """
 Watched work queue processing for `dvx watch`.
 
-Watches a work directory (default .dvx/goals/) and processes files one at a
+Watches a work directory (default .dvx/todo/) and processes files one at a
 time: each file gets its own working branch, is handed to Claude Code,
 and is merged back into the branch that was active when the watcher started,
 which is then pushed to its remote (when one exists) so remote reviewers see
@@ -49,7 +49,7 @@ from state import ensure_dvx_dir, get_dvx_dir
 
 logger = logging.getLogger(__name__)
 
-# Watcher state lives in .dvx/watch/, NOT in the watched .dvx/goals/ inbox.
+# Watcher state lives in .dvx/watch/, NOT in the watched .dvx/todo/ inbox.
 GOALS_STATE_NAME = "watch"
 GOALS_STATE_FILE = "state.json"
 CURRENT_GOAL_CONTENT_FILE = "current-goal.md"
@@ -65,7 +65,9 @@ GOAL_TIMEOUT_SECONDS = 4 * 60 * 60
 GOAL_CONDITION_MAX_CHARS = 4000
 GOAL_REJECTION_SIGNATURE = "Goal condition is limited to"
 COMMIT_TIMEOUT_SECONDS = 30 * 60
-DEFAULT_GOALS_DIR = ".dvx/goals"
+DEFAULT_TODO_DIR = ".dvx/todo"
+# Backward-compatible internal alias for callers importing the old constant.
+DEFAULT_GOALS_DIR = DEFAULT_TODO_DIR
 DEFAULT_POLL_INTERVAL = 2.0
 
 # Control file in the watched directory that requests a merge of the watch
@@ -83,7 +85,7 @@ MERGE_PUSH_MAX_ATTEMPTS = 3
 STATUS_CLAIMED = "claimed"            # popped from queue, content snapshotted
 STATUS_BRANCHED = "branched"          # working branch exists and is checked out
 STATUS_RAN = "ran"                    # Claude Code finished the /goal session
-STATUS_GOAL_DELETED = "goal_deleted"  # goal file removed from goals dir
+STATUS_GOAL_DELETED = "goal_deleted"  # watched file removed from todo dir
 STATUS_COMMITTED = "committed"        # all changes committed on working branch
 STATUS_MERGED = "merged"              # working branch merged into watch branch
 RUN_PREREQ_STATUSES = {STATUS_CLAIMED, STATUS_BRANCHED}
@@ -365,7 +367,7 @@ def _repo_relative_path(path: str) -> str:
 
 
 def _exclude_prefixes(goals_dir: str) -> list[str]:
-    """Path prefixes that must never be committed: the goals inbox and dvx state."""
+    """Path prefixes that must never be committed: the watch inbox and dvx state."""
     goals_prefix = _repo_relative_path(goals_dir)
     prefixes = []
     if goals_prefix:
@@ -830,13 +832,14 @@ def claim_next_goal(state: GoalState, project_dir: Optional[str] = None) -> Opti
         if dirty_baseline:
             state.blocked = {
                 "goal_file": name,
-                "reason": "working tree is dirty outside goals and .dvx",
+                "reason": "working tree is dirty outside the watched directory and .dvx",
                 "dirty_paths": dirty_baseline,
                 "at": datetime.now().isoformat(),
             }
             save_goal_state(state, project_dir)
             logger.warning(
-                f"Blocking goal {name}: working tree is dirty outside goals and .dvx: "
+                f"Blocking goal {name}: working tree is dirty outside the watched directory "
+                "and .dvx: "
                 f"{dirty_baseline}"
             )
             return None
@@ -1386,13 +1389,13 @@ def claim_merge_request(
     if dirty:
         state.blocked = {
             "merge_file": MERGE_FILE_NAME,
-            "reason": "working tree is dirty outside goals and .dvx",
+            "reason": "working tree is dirty outside the watched directory and .dvx",
             "dirty_paths": dirty,
             "at": datetime.now().isoformat(),
         }
         save_goal_state(state, project_dir)
         logger.warning(
-            f"Blocking merge request: working tree is dirty outside goals "
+            "Blocking merge request: working tree is dirty outside the watched directory "
             f"and .dvx: {dirty}"
         )
         return None, ""
@@ -1609,7 +1612,7 @@ def _has_resumable_work(state: GoalState) -> bool:
 
 def run_goal_watch(
     start_branch: str,
-    goals_dir: str = DEFAULT_GOALS_DIR,
+    goals_dir: str = DEFAULT_TODO_DIR,
     poll_interval: float = DEFAULT_POLL_INTERVAL,
     once: bool = False,
     claude_runner: Optional[Callable[[str], SessionResult]] = None,

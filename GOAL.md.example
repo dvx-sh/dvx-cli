@@ -2,13 +2,13 @@
 GOAL file template for `dvx watch`.
 
 How to use:
-1. Copy this file to <goals-dir>/GOAL-<short-slug>.md (default goals dir: .dvx/goals).
+1. Copy this file to <todo-dir>/GOAL-<short-slug>.md (default todo dir: .dvx/todo).
    The filename becomes the working branch name: GOAL-add-rate-limit.md -> branch goal-add-rate-limit.
    Use only lowercase letters, digits, and dashes in the slug, and pick a slug whose
    goal-<slug> branch does not already exist — otherwise the watcher skips the goal as failed.
 2. Fill in every section below. Delete this comment block and any section that is
    genuinely empty.
-3. Drop the file into the goals directory while `dvx watch` is running (or start
+3. Drop the file into the todo directory while `dvx watch` is running (or start
    `dvx watch` afterwards). Outside of MERGE requests, the watcher processes
    files oldest-first by file modification time, then filename.
 
@@ -93,11 +93,11 @@ these itself — include any setup needed (venv activation, env vars, etc.).>
 
 - Work only on the current branch. Do NOT push, open pull requests, switch
   branches, or merge — the watcher handles integration.
-- Do NOT create, modify, or delete anything under the goals directory (default
-  `.dvx/goals/`) or `.dvx/`. The watcher fails the goal if commits touch these paths
+- Do NOT create, modify, or delete anything under the todo directory (default
+  `.dvx/todo/`) or `.dvx/`. The watcher fails the goal if commits touch these paths
   or if queued GOAL-*.md files change during the session.
 - Committing is optional: a follow-up session commits remaining changes in logical
-  groups. If you do commit, exclude the goals directory and `.dvx/`, and explain
+  groups. If you do commit, exclude the todo directory and `.dvx/`, and explain
   why in the message, not what.
 - Leave the working tree in a state where everything you changed can be committed:
   no stray scratch files, debug output, or half-applied edits.

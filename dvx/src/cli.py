@@ -43,8 +43,8 @@ from consensus import (
 )
 from context import load_latest_content, slug_from, slug_from_plan_file
 from goals import (
-    DEFAULT_GOALS_DIR,
     DEFAULT_POLL_INTERVAL,
+    DEFAULT_TODO_DIR,
     clear_goal_state,
     run_goal_watch,
 )
@@ -1136,9 +1136,16 @@ def main() -> int:
         ),
     )
     watch_parser.add_argument(
+        "--todo",
+        dest="goals",
+        default=DEFAULT_TODO_DIR,
+        help=f"Directory to watch for work files (default: {DEFAULT_TODO_DIR})",
+    )
+    watch_parser.add_argument(
         "--goals",
-        default=DEFAULT_GOALS_DIR,
-        help=f"Directory to watch for work files (default: {DEFAULT_GOALS_DIR})",
+        dest="goals",
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
     )
     watch_parser.add_argument(
         "--poll-interval",

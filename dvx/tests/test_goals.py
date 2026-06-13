@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 import goals as goals_module
 from claude_session import DEFAULT_CLAUDE_MODEL, SessionResult
 from goals import (
+    DEFAULT_TODO_DIR,
     ITEM_TYPE_GOAL,
     ITEM_TYPE_RUN,
     MERGE_FILE_NAME,
@@ -89,7 +90,7 @@ def fail_merge_runner(target):
 
 
 class GitRepoTestCase:
-    """Base: temp git repo on branch 'work' with a goals directory."""
+    """Base: temp git repo on branch 'work' with a watched work directory."""
 
     def setup_method(self):
         self.temp_dir = tempfile.mkdtemp()
@@ -1253,6 +1254,15 @@ class TestProcessGoal(GitRepoTestCase):
 
 
 class TestRunGoalWatch(GitRepoTestCase):
+    def test_default_watch_dir_is_dvx_todo(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+
+        rc = run_goal_watch("work", once=True)
+
+        assert rc == 0
+        assert Path(DEFAULT_TODO_DIR).is_dir()
+        assert load_goal_state().goals_dir == DEFAULT_TODO_DIR
+
     def test_once_with_empty_dir_returns_immediately(self, monkeypatch):
         monkeypatch.chdir(self.temp_dir)
         shutil.rmtree(Path("goals"))
@@ -1873,7 +1883,7 @@ class TestRunGoalWatch(GitRepoTestCase):
         state = self.new_state()
         state.blocked = {
             "goal_file": "GOAL-noop.md",
-            "reason": "working tree is dirty outside goals and .dvx",
+            "reason": "working tree is dirty outside the watched directory and .dvx",
             "dirty_paths": ["b.txt", "a.txt"],
         }
         monkeypatch.setattr(goals_module, "_dirty_paths", lambda goals_dir: ["a.txt", "b.txt"])

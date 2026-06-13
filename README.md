@@ -24,7 +24,7 @@ In a separate terminal, in your project directory:
 dvx watch
 ```
 
-It watches `.dvx/goals/` for work files. `GOAL*.md` files keep the `/goal` flow; any other regular file (`PLAN*.md`, `TASK*.md`, `TODO*.md`, `.txt`, etc.) runs through the same loop as `dvx run`. Outside of MERGE requests, files are processed oldest-first by file modification time, then filename. Each file gets its own branch, a headless Claude session implements it with the configured Claude model (default: `claude-opus-4-8`), and changes are committed in logical groups and merged back. A killed watcher resumes where it left off (`dvx clear` resets watcher state). The watcher only claims files when the working tree is clean — commit or stash first; blocked files are reported along with the dirty paths. Merges land on the branch the watcher was started on, which is then pushed to its remote (when one exists) — run the watcher on a dedicated branch and review the work there; nothing touches main unless you start the watcher on main.
+It watches `.dvx/todo/` for work files. `GOAL*.md` files keep the `/goal` flow; any other regular file (`PLAN*.md`, `TASK*.md`, `TODO*.md`, `.txt`, etc.) runs through the same loop as `dvx run`. Outside of MERGE requests, files are processed oldest-first by file modification time, then filename. Each file gets its own branch, a headless Claude session implements it with the configured Claude model (default: `claude-opus-4-8`), and changes are committed in logical groups and merged back. A killed watcher resumes where it left off (`dvx clear` resets watcher state). The watcher only claims files when the working tree is clean — commit or stash first; blocked files are reported along with the dirty paths. Merges land on the branch the watcher was started on, which is then pushed to its remote (when one exists) — run the watcher on a dedicated branch and review the work there; nothing touches main unless you start the watcher on main.
 
 
 ### Claude model selection
@@ -39,12 +39,12 @@ dvx watch --model claude-opus-4-8
 
 `dvx run`, `dvx plan`, and `dvx watch` validate the selected model before starting Claude-backed work and print a clear error if the Claude CLI cannot use it.
 
-## Queue a goal
+## Queue work
 
 Paste this prompt into Claude Code:
 
 ```
-Read GOAL.md.example, then create a well-scoped goal file in .dvx/goals/ for this task:
+Read GOAL.md.example, then create a well-scoped GOAL*.md file in .dvx/todo/ for this task:
 
 <describe your task>
 
@@ -53,13 +53,16 @@ The goal file is the entire instruction set the implementer receives, so make it
 self-contained.
 ```
 
+You can also drop non-GOAL work files into `.dvx/todo/`; those run through the
+same loop as `dvx run`.
+
 ## Merge the watch branch
 
-Drop a file named `MERGE` in `.dvx/goals/` to ask the watcher to merge the watch branch into a remote branch. An empty file targets the remote's default branch; otherwise the file contains a single branch name and nothing else (e.g. `dev` — not `origin/dev`, no prose) — agents generate this file, so the convention matters.
+Drop a file named `MERGE` in `.dvx/todo/` to ask the watcher to merge the watch branch into a remote branch. An empty file targets the remote's default branch; otherwise the file contains a single branch name and nothing else (e.g. `dev` — not `origin/dev`, no prose) — agents generate this file, so the convention matters.
 
 ```bash
-touch .dvx/goals/MERGE            # merge into the default branch
-echo dev > .dvx/goals/MERGE       # merge into origin/dev
+touch .dvx/todo/MERGE            # merge into the default branch
+echo dev > .dvx/todo/MERGE       # merge into origin/dev
 ```
 
 The merge runs between queued files — after the in-flight item finishes (if any) and before the next queued one; it takes precedence over the queue. The watcher fetches, merges the remote target into the watch branch (a Claude session resolves any conflicts), fast-forwards the remote target to the watch branch tip — never force-pushed, so if the target advances mid-merge the watcher re-fetches and re-merges instead of clobbering it — then pushes the watch branch. The MERGE file is consumed when claimed. Like queued files, the merge only starts on a clean working tree, and it requires a git remote with the target branch already on it.

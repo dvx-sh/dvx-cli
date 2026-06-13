@@ -23,7 +23,13 @@ from cli import (
     load_queue,
     save_queue,
 )
-from goals import GoalState, goals_state_file, load_goal_state, save_goal_state
+from goals import (
+    DEFAULT_TODO_DIR,
+    GoalState,
+    goals_state_file,
+    load_goal_state,
+    save_goal_state,
+)
 from state import get_dvx_dir
 
 
@@ -391,10 +397,10 @@ class TestWatchCommand:
 
         monkeypatch.setattr("cli.run_goal_watch", fake_run_goal_watch)
 
-        result = cmd_watch(SimpleNamespace(goals="./goals", poll_interval=2.0, once=True, model=None))
+        result = cmd_watch(SimpleNamespace(goals=DEFAULT_TODO_DIR, poll_interval=2.0, once=True, model=None))
 
         assert result == 0
-        assert calls == [("work", "./goals", 2.0, True, DEFAULT_CLAUDE_MODEL)]
+        assert calls == [("work", DEFAULT_TODO_DIR, 2.0, True, DEFAULT_CLAUDE_MODEL)]
 
     def test_watch_model_argument_overrides_env(self, monkeypatch):
         monkeypatch.chdir(self.temp_dir)
