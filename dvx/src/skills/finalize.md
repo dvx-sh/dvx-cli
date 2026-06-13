@@ -127,9 +127,9 @@ git diff $ARGUMENTS.base_branch...HEAD
 
 **Verdict tag placement**: the verdict tag (`[APPROVED]`, `[SUGGESTIONS]`,
 `[ISSUES]`, or `[CRITICAL]`) MUST be the **first non-empty line** of your
-response. The orchestrator parses the first line to decide next steps —
-anything else is treated as a parse error and the run is blocked for human
-review.
+response with **zero preamble**. All narrative, analysis, and recap MUST
+go after the tag, under the `## Summary` section. The orchestrator scans for
+this tag to decide next steps.
 
 After your thorough analysis, output ONE of these signals:
 

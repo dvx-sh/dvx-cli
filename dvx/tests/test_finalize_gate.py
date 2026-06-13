@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from orchestrator import (
     FINALIZE_VERDICTS,
-    _extract_first_line_verdict,
+    _extract_verdict,
     parse_finalizer_result,
 )
 from state import (
@@ -20,36 +20,52 @@ from state import (
 )
 
 
-class TestExtractFirstLineVerdict:
+class TestExtractVerdict:
     def test_first_line_approved(self):
-        assert _extract_first_line_verdict("[APPROVED]\n\ndetails") == "APPROVED"
+        assert _extract_verdict("[APPROVED]\n\ndetails") == "APPROVED"
 
     def test_first_line_issues(self):
-        assert _extract_first_line_verdict("[ISSUES]\nissue 1") == "ISSUES"
+        assert _extract_verdict("[ISSUES]\nissue 1") == "ISSUES"
+
+    def test_tag_prefixed_summary(self):
+        assert _extract_verdict("[APPROVED] All good") == "APPROVED"
+        assert _extract_verdict("[ISSUES] Found one blocker") == "ISSUES"
 
     def test_first_line_suggestions(self):
-        assert _extract_first_line_verdict("[SUGGESTIONS]\nmore") == "SUGGESTIONS"
+        assert _extract_verdict("[SUGGESTIONS]\nmore") == "SUGGESTIONS"
 
     def test_first_line_critical(self):
-        assert _extract_first_line_verdict("[CRITICAL]\nbad") == "CRITICAL"
+        assert _extract_verdict("[CRITICAL]\nbad") == "CRITICAL"
 
     def test_leading_blank_line(self):
-        assert _extract_first_line_verdict("\n\n[APPROVED]\n...") == "APPROVED"
+        assert _extract_verdict("\n\n[APPROVED]\n...") == "APPROVED"
 
     def test_case_insensitive(self):
-        assert _extract_first_line_verdict("[approved]\nbody") == "APPROVED"
+        assert _extract_verdict("[approved]\nbody") == "APPROVED"
 
-    def test_verdict_buried_not_detected(self):
-        """If the verdict is not on the first non-empty line, parse returns None."""
-        assert _extract_first_line_verdict("prose prose\n[APPROVED]") is None
+    def test_verdict_buried_is_detected(self):
+        """If the verdict is not on the first non-empty line, parse still returns it."""
+        assert _extract_verdict("prose prose\n[APPROVED]") == "APPROVED"
+
+    def test_robust_parsing_formats(self):
+        """Should detect tags even with markdown or prefix text."""
+        assert _extract_verdict("**[APPROVED]**") == "APPROVED"
+        assert _extract_verdict("Verdict: [APPROVED]") == "APPROVED"
+        assert _extract_verdict("### [APPROVED]") == "APPROVED"
+        assert _extract_verdict("Final verdict: [APPROVED]") == "APPROVED"
+        assert _extract_verdict("- [ISSUES]") == "ISSUES"
+
+        # But should NOT detect conversational mentions
+        assert _extract_verdict("I'll give [APPROVED] if you want") is None
+        assert _extract_verdict("The verdict is [APPROVED]") is None
 
     def test_empty_output(self):
-        assert _extract_first_line_verdict("") is None
-        assert _extract_first_line_verdict("\n\n\n") is None
+        assert _extract_verdict("") is None
+        assert _extract_verdict("\n\n\n") is None
 
     def test_all_verdicts_recognized(self):
         for tag in FINALIZE_VERDICTS:
-            assert _extract_first_line_verdict(f"[{tag}]\n") == tag
+            assert _extract_verdict(f"[{tag}]\n") == tag
 
 
 class TestParseFinalizerResult:
@@ -90,12 +106,12 @@ class TestParseFinalizerResult:
         assert r["has_critical"] is True
         assert r["approved"] is False
 
-    def test_parse_error_on_buried_tag(self):
-        # Even if [APPROVED] is in the output, a buried tag is a parse error.
+    def test_no_parse_error_on_buried_tag(self):
+        # A buried tag should now be extracted properly
         r = parse_finalizer_result("Here is my review:\n[APPROVED]\n")
-        assert r["parse_error"] is True
-        assert r["approved"] is False
-        assert r["verdict"] is None
+        assert r["parse_error"] is False
+        assert r["approved"] is True
+        assert r["verdict"] == "APPROVED"
 
     def test_parse_error_on_no_tag(self):
         r = parse_finalizer_result("no tag at all")
