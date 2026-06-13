@@ -9,20 +9,20 @@
 3. Track orchestration state in a local `.dvx/` directory
 4. Preserve per-plan decisions and blocked context for later resumption
 
-The CLI does not execute tasks directly. It loads markdown skill files from `dvx/src/skills/` and sends those prompts to Claude Code through the wrappers in `dvx/src/claude_session.py`.
+The CLI does not execute tasks directly. It loads markdown skill files from `src/skills/` and sends those prompts to Claude Code through the wrappers in `src/claude_session.py`.
 
 ## Repository Layout
 
-- `dvx/src/cli.py`: command-line entrypoint for `plan`, `run`, `status`, `decisions`, and `clean`
-- `dvx/src/orchestrator.py`: main implement -> review -> test -> commit loop and finalization flow
-- `dvx/src/plan_parser.py`: Claude-assisted task extraction and `.dvx/task-status.json` tracking
-- `dvx/src/state.py`: persistent per-plan state under `.dvx/<plan-name>/`
-- `dvx/src/claude_session.py`: wrappers around the `claude` CLI for interactive and non-interactive sessions
-- `dvx/src/skills/*.md`: prompt templates used both internally and as `/dvx:*` Claude Code commands
-- `dvx/bin/dvx`: installed launcher that executes `~/.dvx/src/cli.py` with `~/.dvx/.venv/bin/python`
-- `dvx/bin/setup`: creates the installed virtualenv and runs `pip install -e .`
-- `dvx/bin/dev-setup`: local repo development bootstrap
-- `dvx/tests/`: pytest coverage for CLI, parser, state, orchestrator, and Claude session behavior
+- `src/cli.py`: command-line entrypoint for `plan`, `run`, `status`, `decisions`, and `clean`
+- `src/orchestrator.py`: main implement -> review -> test -> commit loop and finalization flow
+- `src/plan_parser.py`: Claude-assisted task extraction and `.dvx/task-status.json` tracking
+- `src/state.py`: persistent per-plan state under `.dvx/<plan-name>/`
+- `src/claude_session.py`: wrappers around the `claude` CLI for interactive and non-interactive sessions
+- `src/skills/*.md`: prompt templates used both internally and as `/dvx:*` Claude Code commands
+- `bin/dvx`: installed launcher that executes `~/.dvx/src/cli.py` with `~/.dvx/.venv/bin/python`
+- `bin/setup`: creates the installed virtualenv and runs `pip install -e .`
+- `bin/dev-setup`: local repo development bootstrap
+- `tests/`: pytest coverage for CLI, parser, state, orchestrator, and Claude session behavior
 
 ## Runtime and Dependencies
 
@@ -40,20 +40,20 @@ The CLI does not execute tasks directly. It loads markdown skill files from `dvx
 
 Single canonical installer. Auto-detects how it is run:
 
-- **Local clone** (`./install.sh`): detects the `dvx/` payload in the script's directory and installs from the checkout.
-- **Remote** (`curl … | bash`): downloads the GitHub archive, extracts it, and installs from that payload.
+- **Local clone** (`./install.sh`): detects the repository root in the script's directory and installs from the checkout.
+- **Remote** (`curl … | bash`): downloads the GitHub archive, extracts it, and installs from that repository root payload.
 - `--local` / `--remote` force a mode instead of auto-detecting; `--help` prints usage.
 - Pass `--dev` to also install dev dependencies (pytest, ruff).
 
 Steps in both modes:
-1. Copies `dvx/` into `~/.dvx/`
+1. Copies the project files into `~/.dvx/`
 2. Makes `~/.dvx/bin/*` executable
 3. Installs skill markdown files into `~/.claude/commands/dvx/` (template files starting with `_` are skipped)
 4. Runs `~/.dvx/bin/setup`
 
 `install-remote.sh` was deleted — its functionality was merged into `install.sh`.
 
-### `dvx/bin/setup`
+### `bin/setup`
 
 Installed-environment bootstrap:
 
@@ -69,7 +69,7 @@ This script prints the expected shell PATH update:
 export PATH="${HOME}/.dvx/bin:$PATH"
 ```
 
-### `dvx/bin/dev-setup`
+### `bin/dev-setup`
 
 Repository-local development bootstrap:
 
@@ -82,7 +82,7 @@ Repository-local development bootstrap:
 From the repo root:
 
 ```bash
-dvx/bin/dev-setup
+bin/dev-setup
 source .venv/bin/activate
 invoke tests
 invoke lint
@@ -91,7 +91,7 @@ invoke check
 
 ## Installed Command Behavior
 
-After installation, `dvx` resolves to `dvx/bin/dvx`, which:
+After installation, `dvx` resolves to `bin/dvx`, which:
 
 1. Checks for `~/.dvx/.venv/bin/python`
 2. Errors if setup has not been run

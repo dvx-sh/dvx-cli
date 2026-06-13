@@ -11,7 +11,7 @@ if ! command -v uv >/dev/null 2>&1; then
     exit 1
 fi
 
-cd "$(git rev-parse --show-toplevel)/dvx"
+cd "$(git rev-parse --show-toplevel)"
 
 # uv resolves the dev tools (ruff, pytest, invoke) from uv.lock, so the
 # checks never depend on whatever happens to be on the caller's PATH.
