@@ -44,7 +44,6 @@ from state import (
 
 logger = logging.getLogger(__name__)
 
-# Path to skills directory
 SKILLS_DIR = Path(__file__).parent / "skills"
 
 

@@ -42,12 +42,8 @@ class AutopilotPlan:
     model: Optional[str] = None
 
 
-def derive_plan_filename(slug: str) -> str:
-    return f"PLAN-{slug}.md"
-
-
 def plan_file_for_slug(slug: str) -> str:
-    return derive_plan_filename(slug)
+    return f"PLAN-{slug}.md"
 
 
 def interview_artifact_exists(slug: str, project_dir: Optional[str] = None) -> bool:

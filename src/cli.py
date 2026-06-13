@@ -140,7 +140,6 @@ def ensure_skills_installed(
             continue  # Skip template files
         installed_names.add(skill_file.name)
         target = commands_dir / skill_file.name
-        # Only copy if source is newer or target doesn't exist
         if not target.exists() or skill_file.stat().st_mtime > target.stat().st_mtime:
             shutil.copy2(skill_file, target)
 
@@ -191,10 +190,8 @@ def cmd_plan(args) -> int:
 
     # Get input: piped or editor
     if not sys.stdin.isatty():
-        # Input is piped
         user_input = sys.stdin.read().strip()
     else:
-        # Open editor
         print("Opening editor to capture plan description...")
         user_input = get_user_input_from_editor()
 
@@ -267,7 +264,6 @@ def cmd_plan(args) -> int:
             print(render_no_consensus_summary(result))
         return 0
 
-    # Use skills instead of inline prompts
     if action == "update":
         result = run_skill("update-plan", {
             "plan_file": plan_file,
@@ -301,7 +297,6 @@ def cmd_plan(args) -> int:
         if not plan_file:
             plan_file = "PLAN-new.md"
 
-    # Write the plan file
     Path(plan_file).write_text(output + "\n")
     print(f"{'Updated' if action == 'update' else 'Created'}: {plan_file}")
 
