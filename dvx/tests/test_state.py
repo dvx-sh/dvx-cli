@@ -13,6 +13,7 @@ from state import (
     clear_blocked,
     create_initial_state,
     ensure_dvx_dir,
+    get_decision_file_topic,
     get_decisions,
     get_dvx_dir,
     get_dvx_root,
@@ -271,6 +272,25 @@ class TestStateManagement:
 
         assert "First" in content
         assert "Second" in content
+
+    def test_log_decision_sanitizes_topic_path_separators(self):
+        """log_decision should not treat topic separators as directories."""
+        topic = "enforcement of non-allow/block actions"
+        log_decision(topic, "Restrict non-allow actions", "Avoid policy gaps", [], self.plan_file, self.temp_dir)
+
+        dvx_dir = get_dvx_dir(self.plan_file, self.temp_dir)
+        decision_file = dvx_dir / "DECISIONS-enforcement-of-non-allow-block-actions.md"
+
+        assert decision_file.exists()
+        assert not (dvx_dir / "DECISIONS-enforcement of non-allow").exists()
+        content = decision_file.read_text()
+        assert f"# Decisions: {topic}" in content
+        assert "Restrict non-allow actions" in content
+
+    def test_get_decision_file_topic_replaces_reserved_chars(self):
+        """Decision filename topics should stay within a single safe filename."""
+        assert get_decision_file_topic("../../allow\\block: actions?") == "allow-block-actions"
+        assert get_decision_file_topic("///") == "untitled"
 
     def test_get_decisions(self):
         """get_decisions should return all decision files."""

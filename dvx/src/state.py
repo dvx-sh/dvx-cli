@@ -8,6 +8,7 @@ Supports multiple concurrent plans in the same project.
 import json
 import logging
 import os
+import re
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime
 from enum import Enum
@@ -20,11 +21,19 @@ DVX_DIR = ".dvx"
 STATE_FILE = "state.json"
 BLOCKED_FILE = "blocked-context.md"
 LOG_FILE = "dvx.log"
+SAFE_DECISION_TOPIC_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
 def get_plan_dir_name(plan_file: str) -> str:
     """Get the directory name for a plan file (just the filename, no path)."""
     return Path(plan_file).name
+
+
+def get_decision_file_topic(topic: str) -> str:
+    """Return a filesystem-safe decision topic for DECISIONS filenames."""
+    safe_topic = SAFE_DECISION_TOPIC_RE.sub("-", topic.strip())
+    safe_topic = re.sub(r"-+", "-", safe_topic).strip("-.")
+    return safe_topic or "untitled"
 
 
 class Phase(Enum):
@@ -251,7 +260,7 @@ def log_decision(topic: str, decision: str, reasoning: str, alternatives: list[s
     These are decisions made by Claude that the user should review.
     """
     dvx_dir = ensure_dvx_dir(plan_file, project_dir)
-    decision_file = dvx_dir / f"DECISIONS-{topic}.md"
+    decision_file = dvx_dir / f"DECISIONS-{get_decision_file_topic(topic)}.md"
 
     # Append to existing or create new
     timestamp = datetime.now().isoformat()
