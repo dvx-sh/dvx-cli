@@ -5,9 +5,11 @@ import shutil
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+import cli as cli_module
 from autopilot import (
     PHASE_COMPLETE,
     PHASE_FAILED,
@@ -315,3 +317,41 @@ class TestRunPipeline:
         assert "task: x" in summary
         assert "slug: x" in summary
         assert "exit code: 0" in summary
+
+
+class TestAutopilotDeslopDefault:
+    """The autopilot CLI inverts the opt-in --deslop flag into the internal no_deslop."""
+
+    def _run_autopilot(self, monkeypatch, *, deslop):
+        captured = {}
+
+        def fake_build_plan_from_args(*, no_deslop, **kwargs):
+            captured["no_deslop"] = no_deslop
+            return SimpleNamespace(task="x", slug="x", plan_file="PLAN-x.md")
+
+        monkeypatch.setattr(cli_module, "_check_selected_claude_model", lambda model, label: (True, ""))
+        monkeypatch.setattr(cli_module, "build_plan_from_args", fake_build_plan_from_args)
+        monkeypatch.setattr(cli_module, "run_pipeline", lambda plan, **kwargs: 0)
+        monkeypatch.setattr(cli_module, "summarize_autopilot", lambda plan, rc: "summary")
+        monkeypatch.setattr(cli_module, "write_autopilot_summary", lambda plan, summary: None)
+
+        args = SimpleNamespace(
+            task="do work",
+            resume=None,
+            skip_interview=False,
+            skip_consensus=False,
+            deslop=deslop,
+            plan_file=None,
+            model=None,
+        )
+        rc = cli_module.cmd_autopilot(args)
+        assert rc == 0
+        return captured["no_deslop"]
+
+    def test_deslop_skipped_by_default(self, monkeypatch):
+        # Default: --deslop absent -> deslop pass is skipped.
+        assert self._run_autopilot(monkeypatch, deslop=False) is True
+
+    def test_deslop_flag_enables_pass(self, monkeypatch):
+        # Opt-in: --deslop -> deslop pass runs.
+        assert self._run_autopilot(monkeypatch, deslop=True) is False

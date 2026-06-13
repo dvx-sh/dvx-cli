@@ -140,7 +140,6 @@ def ensure_skills_installed(
             continue  # Skip template files
         installed_names.add(skill_file.name)
         target = commands_dir / skill_file.name
-        # Only copy if source is newer or target doesn't exist
         if not target.exists() or skill_file.stat().st_mtime > target.stat().st_mtime:
             shutil.copy2(skill_file, target)
 
@@ -191,10 +190,8 @@ def cmd_plan(args) -> int:
 
     # Get input: piped or editor
     if not sys.stdin.isatty():
-        # Input is piped
         user_input = sys.stdin.read().strip()
     else:
-        # Open editor
         print("Opening editor to capture plan description...")
         user_input = get_user_input_from_editor()
 
@@ -267,7 +264,6 @@ def cmd_plan(args) -> int:
             print(render_no_consensus_summary(result))
         return 0
 
-    # Use skills instead of inline prompts
     if action == "update":
         result = run_skill("update-plan", {
             "plan_file": plan_file,
@@ -301,7 +297,6 @@ def cmd_plan(args) -> int:
         if not plan_file:
             plan_file = "PLAN-new.md"
 
-    # Write the plan file
     Path(plan_file).write_text(output + "\n")
     print(f"{'Updated' if action == 'update' else 'Created'}: {plan_file}")
 
@@ -368,7 +363,7 @@ def _autopilot_running_phase(plan: AutopilotPlan, project_dir: Optional[str]) ->
         plan_file=plan.plan_file,
         force=False,
         step=False,
-        no_deslop=plan.no_deslop,
+        deslop=not plan.no_deslop,
         model=getattr(plan, "model", None),
     )
     print("[autopilot] phase: running")
@@ -377,7 +372,7 @@ def _autopilot_running_phase(plan: AutopilotPlan, project_dir: Optional[str]) ->
 
 def cmd_autopilot(args) -> int:
     """
-    Sequence: interview → consensus plan → run (with finalize + deslop).
+    Sequence: interview → consensus plan → run (with finalize; deslop opt-in).
 
     Each phase writes its own artifact so a failure in any one phase is
     resumable via `dvx autopilot --resume <slug>` (or the phase-level
@@ -400,7 +395,7 @@ def cmd_autopilot(args) -> int:
         task=task,
         skip_interview=getattr(args, "skip_interview", False),
         skip_consensus=getattr(args, "skip_consensus", False),
-        no_deslop=getattr(args, "no_deslop", False),
+        no_deslop=not getattr(args, "deslop", False),
         explicit_plan_file=getattr(args, "plan_file", None),
         resume_slug=resume_slug,
         model=getattr(args, "model", None),
@@ -809,7 +804,7 @@ def _cmd_run_with_model(args, model: str) -> int:
     # Check state first - skip sync for blocked/paused/complete states
     state = load_state(plan_file)
     step_mode = args.step
-    no_deslop = bool(getattr(args, "no_deslop", False))
+    no_deslop = not bool(getattr(args, "deslop", False))
 
     # Handle blocked state - launch interactive session to resolve
     if state is not None and state.phase == Phase.BLOCKED.value:
@@ -1147,7 +1142,7 @@ def main() -> int:
     run_parser.add_argument("plan_file", help="Path to PLAN-*.md file")
     run_parser.add_argument("-f", "--force", action="store_true", help="Force restart with new plan file")
     run_parser.add_argument("-s", "--step", action="store_true", help="Step mode: pause after each task for review")
-    run_parser.add_argument("--no-deslop", action="store_true", help="Skip the post-approval deslop cleanup pass")
+    run_parser.add_argument("--deslop", action="store_true", help="Run the post-approval deslop cleanup pass (off by default)")
     run_parser.add_argument(
         "--model",
         help=(
@@ -1241,9 +1236,9 @@ def main() -> int:
         help="Skip the consensus loop; produce a single-perspective plan",
     )
     autopilot_parser.add_argument(
-        "--no-deslop",
+        "--deslop",
         action="store_true",
-        help="Skip the post-approval deslop cleanup pass",
+        help="Run the post-approval deslop cleanup pass (off by default)",
     )
     autopilot_parser.add_argument(
         "--plan-file",

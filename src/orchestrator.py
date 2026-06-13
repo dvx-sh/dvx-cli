@@ -44,7 +44,6 @@ from state import (
 
 logger = logging.getLogger(__name__)
 
-# Path to skills directory
 SKILLS_DIR = Path(__file__).parent / "skills"
 
 
@@ -1576,7 +1575,7 @@ def _run_finalization(plan_file: str, state: State, no_deslop: bool = False) -> 
 
     # === DESLOP PASS (post-APPROVED only) ===
     if no_deslop:
-        logger.info("Skipping deslop pass (--no-deslop)")
+        logger.info("Skipping deslop pass (not opted in via --deslop)")
     else:
         _run_deslop_pass(plan_file, state)
 
