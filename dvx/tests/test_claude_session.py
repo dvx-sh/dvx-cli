@@ -11,6 +11,8 @@ import stat
 import textwrap
 
 from claude_session import (
+    CLAUDE_EFFORT,
+    CODEX_EFFORT,
     DEFAULT_CLAUDE_MODEL,
     DVX_MODEL_ENV_VAR,
     SessionResult,
@@ -19,7 +21,10 @@ from claude_session import (
     _parse_stream_event,
     _parse_stream_output,
     _result_is_error,
+    check_agent_model_available,
     claude_model_override,
+    is_gpt_model,
+    run_agent,
     run_claude,
 )
 
@@ -27,6 +32,14 @@ from claude_session import (
 def write_stub_claude(tmp_path, body: str):
     """Install a fake `claude` executable on PATH that runs the python body."""
     script = tmp_path / "claude"
+    script.write_text(f"#!/usr/bin/env python3\n{textwrap.dedent(body)}")
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    return script
+
+
+def write_stub_codex(tmp_path, body: str):
+    """Install a fake `codex` executable on PATH that runs the python body."""
+    script = tmp_path / "codex"
     script.write_text(f"#!/usr/bin/env python3\n{textwrap.dedent(body)}")
     script.chmod(script.stat().st_mode | stat.S_IEXEC)
     return script
@@ -143,6 +156,8 @@ class TestRunClaudeStreaming:
         argv = json.loads(result.output)
         model_index = argv.index("--model")
         assert argv[model_index + 1] == DEFAULT_CLAUDE_MODEL
+        effort_index = argv.index("--effort")
+        assert argv[effort_index + 1] == CLAUDE_EFFORT
 
     def test_dvx_model_env_overrides_default(self, monkeypatch, tmp_path):
         monkeypatch.setenv(DVX_MODEL_ENV_VAR, "env-model")
@@ -172,6 +187,178 @@ class TestRunClaudeStreaming:
         assert result.blocked is True
         assert "bad-model" in result.block_reason
         assert "unavailable" in result.block_reason
+
+
+class TestRunCodex:
+    def test_gpt_model_routes_to_codex_with_yolo_flags(self, monkeypatch, tmp_path):
+        write_stub_codex(tmp_path, """
+            import json
+            import sys
+            from pathlib import Path
+
+            out = Path(sys.argv[sys.argv.index("--output-last-message") + 1])
+            out.write_text(json.dumps(sys.argv))
+            print(json.dumps({"type": "exec_command_begin", "session_id": "codex-session"}))
+            print(json.dumps({"type": "result", "result": "done", "session_id": "codex-session"}))
+        """)
+        monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+
+        result = run_agent("hello", cwd=str(tmp_path), timeout=30, model="gpt-5.5")
+
+        assert result.success
+        assert result.session_id == "codex-session"
+        assert result.result_event_seen is True
+        argv = json.loads(result.output)
+        assert argv[:2] == [str(tmp_path / "codex"), "exec"]
+        assert argv[argv.index("--model") + 1] == "gpt-5.5"
+        assert argv[argv.index("--cd") + 1] == str(tmp_path)
+        assert argv[argv.index("--sandbox") + 1] == "danger-full-access"
+        assert "--dangerously-bypass-approvals-and-sandbox" in argv
+        assert "--ask-for-approval" not in argv
+        config_index = argv.index("-c")
+        assert argv[config_index + 1] == f'model_reasoning_effort="{CODEX_EFFORT}"'
+        assert argv[-1] == "hello"
+
+    def test_codex_nonzero_exit_is_blocked(self, monkeypatch, tmp_path):
+        write_stub_codex(tmp_path, """
+            import sys
+            print("bad model", file=sys.stderr)
+            raise SystemExit(7)
+        """)
+        monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+
+        result = run_agent("hello", cwd=str(tmp_path), timeout=30, model="gpt-5.5")
+
+        assert result.success is False
+        assert result.blocked is True
+        assert "codex exited with status 7" in result.block_reason
+
+    def test_codex_successful_blocked_marker_is_blocked(self, monkeypatch, tmp_path):
+        write_stub_codex(tmp_path, """
+            import json
+            import sys
+            from pathlib import Path
+
+            out = Path(sys.argv[sys.argv.index("--output-last-message") + 1])
+            out.write_text("[BLOCKED: need credentials]")
+            print(json.dumps({"type": "result", "result": "[BLOCKED: need credentials]",
+                              "session_id": "codex-session"}))
+        """)
+        monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+
+        result = run_agent("hello", cwd=str(tmp_path), timeout=30, model="gpt-5.5")
+
+        assert result.success is True
+        assert result.blocked is True
+        assert result.block_reason == "need credentials"
+
+    def test_codex_successful_blocked_file_mention_is_blocked(self, monkeypatch, tmp_path):
+        write_stub_codex(tmp_path, """
+            import json
+            import sys
+            from pathlib import Path
+
+            out = Path(sys.argv[sys.argv.index("--output-last-message") + 1])
+            out.write_text("See BLOCKED.md for details.")
+            print(json.dumps({"type": "result", "result": "See BLOCKED.md for details.",
+                              "session_id": "codex-session"}))
+        """)
+        monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+
+        result = run_agent("hello", cwd=str(tmp_path), timeout=30, model="gpt-5.5")
+
+        assert result.success is True
+        assert result.blocked is True
+
+    def test_codex_disable_tools_uses_read_only_without_bypass(self, monkeypatch, tmp_path):
+        write_stub_codex(tmp_path, """
+            import json
+            import sys
+            from pathlib import Path
+
+            out = Path(sys.argv[sys.argv.index("--output-last-message") + 1])
+            out.write_text(json.dumps(sys.argv))
+            print(json.dumps({"type": "result", "result": "done", "session_id": "codex-session"}))
+        """)
+        monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+
+        result = run_agent(
+            "hello",
+            cwd=str(tmp_path),
+            timeout=30,
+            model="gpt-5.5",
+            disable_tools=True,
+        )
+
+        assert result.success
+        argv = json.loads(result.output)
+        assert argv[argv.index("--sandbox") + 1] == "read-only"
+        assert 'approval_policy="never"' in argv
+        assert "--dangerously-bypass-approvals-and-sandbox" not in argv
+        assert "danger-full-access" not in argv
+
+    def test_codex_result_without_tool_events_reports_zero_tool_uses(self, monkeypatch, tmp_path):
+        write_stub_codex(tmp_path, """
+            import json
+            import sys
+            from pathlib import Path
+
+            out = Path(sys.argv[sys.argv.index("--output-last-message") + 1])
+            out.write_text("done")
+            print(json.dumps({"type": "result", "result": "done", "session_id": "codex-session"}))
+        """)
+        monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+
+        result = run_agent("hello", cwd=str(tmp_path), timeout=30, model="gpt-5.5")
+
+        assert result.success
+        assert result.result_event_seen is True
+        assert result.tool_use_count == 0
+
+    def test_codex_missing_result_event_is_visible_to_watch_guards(self, monkeypatch, tmp_path):
+        write_stub_codex(tmp_path, """
+            # Exit 0 without JSONL result events or an output-last-message file.
+        """)
+        monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+
+        result = run_agent("hello", cwd=str(tmp_path), timeout=30, model="gpt-5.5")
+
+        assert result.success
+        assert result.result_event_seen is False
+        assert result.tool_use_count == 0
+
+
+class TestAgentModelChecks:
+    def test_gpt_model_detection(self):
+        assert is_gpt_model("gpt-5.5")
+        assert not is_gpt_model("claude-opus-4-8")
+
+    def test_gpt_model_check_uses_codex(self, monkeypatch, tmp_path):
+        write_stub_codex(tmp_path, """
+            import json
+            import sys
+            from pathlib import Path
+
+            out = Path(sys.argv[sys.argv.index("--output-last-message") + 1])
+            out.write_text("OK")
+            print(json.dumps({"type": "result", "result": "OK", "session_id": "check"}))
+        """)
+        monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+
+        ok, error = check_agent_model_available("gpt-5.5", cwd=str(tmp_path), timeout=30)
+
+        assert ok is True
+        assert error == ""
+
+    def test_claude_only_command_rejects_gpt_without_codex_launch(self):
+        ok, error = check_agent_model_available(
+            "gpt-5.5",
+            allow_codex=False,
+            command_name="dvx plan",
+        )
+
+        assert ok is False
+        assert "not supported for dvx plan" in error
 
 
 class TestResultIsError:

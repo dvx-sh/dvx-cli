@@ -11,6 +11,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+import cli as cli_module
 from claude_session import DEFAULT_CLAUDE_MODEL
 from cli import (
     cmd_clear,
@@ -30,7 +31,7 @@ from goals import (
     load_goal_state,
     save_goal_state,
 )
-from state import get_dvx_dir
+from state import Phase, State, get_dvx_dir, load_state, save_state
 
 
 def run_git(args, cwd: str) -> str:
@@ -363,6 +364,44 @@ class TestRunCommandModel:
         assert checked == ["env-model"]
         assert captured["model"] == "env-model"
 
+    def test_run_gpt_blocked_state_refuses_before_interactive(self, monkeypatch, capsys):
+        monkeypatch.chdir(self.temp_dir)
+        plan_file = "PLAN-test.md"
+        Path(plan_file).write_text("# Plan\n- [ ] T1: Do work\n")
+        state = State(
+            plan_file=plan_file,
+            current_task_id="T1",
+            current_task_title="Do work",
+            phase=Phase.BLOCKED.value,
+        )
+        save_state(state)
+        blocked_file = get_dvx_dir(plan_file) / "blocked-context.md"
+        blocked_file.write_text("blocked details\n")
+
+        monkeypatch.setattr("cli._check_selected_model", lambda model: (True, ""))
+        monkeypatch.setattr(
+            "cli.launch_interactive",
+            lambda **kwargs: (_ for _ in ()).throw(AssertionError("should not launch")),
+        )
+        monkeypatch.setattr(
+            "cli.clear_blocked",
+            lambda plan_file: (_ for _ in ()).throw(AssertionError("should not clear")),
+        )
+
+        result = cmd_run(SimpleNamespace(plan_file=plan_file, step=False, no_deslop=False, model="gpt-5.5"))
+
+        assert result == 1
+        output = capsys.readouterr().out
+        assert "cannot resume a saved BLOCKED interactive recovery" in output
+        assert load_state(plan_file).phase == Phase.BLOCKED.value
+        assert blocked_file.exists()
+
+    def test_claude_only_commands_reject_gpt_model(self):
+        ok, error = cli_module._check_selected_claude_model("gpt-5.5", "dvx plan")
+
+        assert ok is False
+        assert "not supported for dvx plan" in error
+
 
 class TestWatchCommand:
     """Tests for the goal-based watch command."""
@@ -424,6 +463,29 @@ class TestWatchCommand:
         assert result == 0
         assert checked == ["cli-model"]
         assert calls == ["cli-model"]
+
+    def test_watch_uses_env_gpt_model_when_no_argument(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        calls = []
+        checked = []
+        monkeypatch.setenv("DVX_MODEL", "gpt-5.5")
+
+        def fake_check(model):
+            checked.append(model)
+            return True, ""
+
+        def fake_run_goal_watch(start_branch, goals_dir, poll_interval, once, model=None):
+            calls.append(model)
+            return 0
+
+        monkeypatch.setattr("cli._check_selected_model", fake_check)
+        monkeypatch.setattr("cli.run_goal_watch", fake_run_goal_watch)
+
+        result = cmd_watch(SimpleNamespace(goals="./goals", poll_interval=2.0, once=True, model=None))
+
+        assert result == 0
+        assert checked == ["gpt-5.5"]
+        assert calls == ["gpt-5.5"]
 
     def test_watch_fails_when_selected_model_is_unavailable(self, monkeypatch):
         monkeypatch.chdir(self.temp_dir)

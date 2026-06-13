@@ -2,15 +2,15 @@
 Watched work queue processing for `dvx watch`.
 
 Watches a work directory (default .dvx/todo/) and processes files one at a
-time: each file gets its own working branch, is handed to Claude Code,
+time: each file gets its own working branch, is handed to the selected agent,
 and is merged back into the branch that was active when the watcher started,
 which is then pushed to its remote (when one exists) so remote reviewers see
 the work.
 
-GOAL*.md files keep the dedicated /goal flow. Every other regular file uses the
-current dvx run loop, with the watched input copied to a stable .dvx/watch/
-snapshot before the run starts so the live inbox file is never part of the work
-branch commits.
+GOAL*.md files use Claude Code's dedicated /goal flow for Claude models and a
+Codex exec prompt for GPT models. Every other regular file uses the current dvx
+run loop, with the watched input copied to a stable .dvx/watch/ snapshot before
+the run starts so the live inbox file is never part of the work branch commits.
 
 The watched directory lives under .dvx/ so it is created by dvx itself and
 is already gitignored - other sessions can queue work simply by dropping files
@@ -25,7 +25,7 @@ the watcher to merge the watch branch into a remote branch - empty file
 means the remote's default branch; otherwise the file holds a single branch
 name (e.g. "dev"). The merge runs between items: after the in-flight item
 finishes (if any) and before the next queued item starts. The remote target
-is brought into the watch branch first (Claude resolves conflicts), then
+is brought into the watch branch first (the selected agent resolves conflicts), then
 the target is fast-forwarded to the watch branch tip - never force-pushed -
 so if another process advances the target mid-merge, the push is rejected
 and the watcher re-fetches and re-merges instead of clobbering it.
@@ -44,7 +44,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
-from claude_session import SessionResult, resolve_claude_model, run_claude
+from claude_session import (
+    SessionResult,
+    is_gpt_model,
+)
+from claude_session import (
+    resolve_agent_model as resolve_claude_model,
+)
+from claude_session import (
+    run_agent as run_claude,
+)
 from state import ensure_dvx_dir, get_dvx_dir
 
 logger = logging.getLogger(__name__)
@@ -437,7 +446,7 @@ def _ensure_branch_creation_claim(
 
 
 # ---------------------------------------------------------------------------
-# Claude Code runners
+# Agent runners
 # ---------------------------------------------------------------------------
 
 def build_goal_prompt(goal_content: str, project_dir: Optional[str] = None) -> str:
@@ -463,30 +472,59 @@ def build_goal_prompt(goal_content: str, project_dir: Optional[str] = None) -> s
     )
 
 
+def build_codex_goal_prompt(goal_content: str, project_dir: Optional[str] = None) -> str:
+    """
+    Build a Codex exec prompt for a watched GOAL file.
+
+    Codex exec is already non-interactive, so do not rely on Claude Code's
+    `/goal` slash command. The prompt explicitly asks Codex to plan, implement,
+    self-review, and verify before finishing.
+    """
+    ensure_dvx_dir(GOALS_STATE_NAME, project_dir)
+    content_file = current_goal_content_file(project_dir)
+    content_file.write_text(goal_content)
+    return (
+        f"Complete the goal specified in the file `{content_file}`.\n\n"
+        "Workflow requirements:\n"
+        "1. Read that file first; it is the complete instruction set: requirements, "
+        "scope limits, decisions already made, verification commands, and rules.\n"
+        "2. Make a concise plan, implement the full requested change, review your "
+        "own diff, and run the smallest verification that proves correctness.\n"
+        "3. Continue fixing issues until the goal requirements are met and the "
+        "verification commands pass, or report a concrete blocker.\n"
+        "4. Do not modify anything under `.dvx/` including the goal snapshot file.\n"
+        "5. Do not ask for user input; use safe, reversible defaults when needed."
+    )
+
+
 def run_goal_with_claude(
     goal_content: str,
     cwd: Optional[str] = None,
     project_dir: Optional[str] = None,
     model: Optional[str] = None,
 ) -> SessionResult:
-    """Run Claude Code with the /goal command for the goal contents."""
-    prompt = build_goal_prompt(goal_content, project_dir)
-    condition_len = len(prompt) - len("/goal ")
-    if condition_len > GOAL_CONDITION_MAX_CHARS:
-        return SessionResult(
-            output="",
-            session_id=None,
-            success=False,
-            blocked=True,
-            block_reason=(
-                f"goal condition is {condition_len} chars, over the /goal limit "
-                f"of {GOAL_CONDITION_MAX_CHARS}"
-            ),
-        )
+    """Run the selected agent for the goal contents."""
+    selected_model = resolve_claude_model(model)
+    if is_gpt_model(selected_model):
+        prompt = build_codex_goal_prompt(goal_content, project_dir)
+    else:
+        prompt = build_goal_prompt(goal_content, project_dir)
+        condition_len = len(prompt) - len("/goal ")
+        if condition_len > GOAL_CONDITION_MAX_CHARS:
+            return SessionResult(
+                output="",
+                session_id=None,
+                success=False,
+                blocked=True,
+                block_reason=(
+                    f"goal condition is {condition_len} chars, over the /goal limit "
+                    f"of {GOAL_CONDITION_MAX_CHARS}"
+                ),
+            )
     return run_claude(
         prompt=prompt,
         cwd=cwd,
-        model=resolve_claude_model(model),
+        model=selected_model,
         timeout=GOAL_TIMEOUT_SECONDS,
     )
 
@@ -1006,7 +1044,7 @@ def _step_run_claude(
     if not guard_ok:
         return False, guard_error
     if not result.success:
-        return False, f"Claude Code failed: {result.block_reason or 'session did not succeed'}"
+        return False, f"Agent session failed: {result.block_reason or 'session did not succeed'}"
     if item_type == ITEM_TYPE_GOAL:
         if GOAL_REJECTION_SIGNATURE in result.output:
             return False, f"/goal rejected the goal: {result.output.strip()[:300]}"

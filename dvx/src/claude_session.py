@@ -1,7 +1,8 @@
 """
-Claude Code session management.
+Agent session management.
 
-Wraps the claude CLI for non-interactive usage with session persistence.
+Wraps Claude Code and Codex CLIs for non-interactive usage while preserving
+the legacy Claude-specific helpers used by interactive flows.
 """
 
 import io
@@ -9,6 +10,7 @@ import json
 import logging
 import os
 import subprocess
+import tempfile
 import threading
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -21,6 +23,9 @@ DEFAULT_CLAUDE_MODEL = "claude-opus-4-8"
 DVX_MODEL_ENV_VAR = "DVX_MODEL"
 MODEL_CHECK_PROMPT = "Reply with exactly OK."
 MODEL_CHECK_TIMEOUT_SECONDS = 60
+CLAUDE_EFFORT = "high"
+CODEX_EFFORT = "xhigh"
+GPT_MODEL_PREFIX = "gpt-"
 
 _CLAUDE_MODEL_OVERRIDE: ContextVar[Optional[str]] = ContextVar(
     "_CLAUDE_MODEL_OVERRIDE",
@@ -66,6 +71,22 @@ def resolve_claude_model(model: Optional[str] = None) -> str:
         or _normalize_model(os.environ.get(DVX_MODEL_ENV_VAR))
         or DEFAULT_CLAUDE_MODEL
     )
+
+
+def resolve_agent_model(model: Optional[str] = None) -> str:
+    """Resolve the selected agent model for model-aware Claude/Codex launches."""
+    return resolve_claude_model(model)
+
+
+def is_gpt_model(model: Optional[str]) -> bool:
+    """Return True when a resolved model should be handled by Codex."""
+    normalized = _normalize_model(model)
+    return bool(normalized and normalized.lower().startswith(GPT_MODEL_PREFIX))
+
+
+def agent_kind_for_model(model: Optional[str]) -> str:
+    """Return the agent CLI family for a model: ``codex`` for gpt-*, else Claude."""
+    return "codex" if is_gpt_model(resolve_command_model(model)) else "claude"
 
 
 def _looks_like_model_unavailable(detail: str) -> bool:
@@ -117,6 +138,45 @@ def check_claude_model_available(
         f"Use --model <model> or {DVX_MODEL_ENV_VAR}=<model> to choose an available model. "
         f"Details: {reason}",
     )
+
+
+def check_agent_model_available(
+    model: Optional[str] = None,
+    cwd: Optional[str] = None,
+    timeout: int = MODEL_CHECK_TIMEOUT_SECONDS,
+    allow_codex: bool = True,
+    command_name: Optional[str] = None,
+) -> tuple[bool, str]:
+    """Validate the selected model through the CLI that will actually run it."""
+    selected = resolve_command_model(model)
+    if is_gpt_model(selected):
+        if not allow_codex:
+            target = f" for {command_name}" if command_name else ""
+            return (
+                False,
+                f"Codex/GPT model '{selected}' is not supported{target} yet. "
+                "Use a Claude model for this command.",
+            )
+
+        with claude_model_override(selected):
+            result = run_codex(
+                MODEL_CHECK_PROMPT,
+                cwd=cwd,
+                timeout=timeout,
+                model=selected,
+                disable_tools=True,
+            )
+        if result.success:
+            return True, ""
+        reason = result.block_reason or result.output.strip() or "Codex CLI model check failed"
+        return (
+            False,
+            f"Codex model '{selected}' is not available. "
+            f"Use --model <model> or {DVX_MODEL_ENV_VAR}=<model> to choose an available model. "
+            f"Details: {reason}",
+        )
+
+    return check_claude_model_available(selected, cwd=cwd, timeout=timeout)
 
 
 @dataclass
@@ -222,6 +282,21 @@ def _parse_stream_event(line: str) -> tuple[Optional[dict], str]:
         return None, ""  # Skip unparseable lines silently
 
 
+def _blocked_marker_from_text(text: str) -> tuple[bool, Optional[str]]:
+    """Detect explicit human-blocked markers in an agent's final text."""
+    if '[BLOCKED:' in text:
+        start = text.find('[BLOCKED:')
+        end = text.find(']', start)
+        if end > start:
+            return True, text[start + 9:end].strip()
+        return True, None
+
+    if '.dvx/BLOCKED' in text or 'BLOCKED.md' in text:
+        return True, None
+
+    return False, None
+
+
 def _parse_stream_output(events: list[dict]) -> tuple[str, Optional[str], bool, Optional[str]]:
     """
     Parse collected stream-json events for final result.
@@ -272,18 +347,7 @@ def _parse_stream_output(events: list[dict]) -> tuple[str, Optional[str], bool, 
         text_output = '\n'.join(streamed_text_parts)
         logger.warning(f"No result event; recovered {len(text_output)} chars from streamed text")
 
-    # Check for block signals in the text output
-    check_text = text_output
-    if '[BLOCKED:' in check_text:
-        is_blocked = True
-        start = check_text.find('[BLOCKED:')
-        end = check_text.find(']', start)
-        if end > start:
-            block_reason = check_text[start + 9:end].strip()
-
-    # Also check for BLOCKED file creation mention
-    if '.dvx/BLOCKED' in check_text or 'BLOCKED.md' in check_text:
-        is_blocked = True
+    is_blocked, block_reason = _blocked_marker_from_text(text_output)
 
     return text_output, session_id, is_blocked, block_reason
 
@@ -336,7 +400,15 @@ def run_claude(
     cwd = cwd or os.getcwd()
     model = resolve_claude_model(model)
 
-    cmd = ['claude', '--dangerously-skip-permissions', '--output-format', 'stream-json', '--verbose']
+    cmd = [
+        'claude',
+        '--dangerously-skip-permissions',
+        '--output-format',
+        'stream-json',
+        '--verbose',
+        '--effort',
+        CLAUDE_EFFORT,
+    ]
 
     if disable_tools:
         cmd.extend(['--tools', ''])
@@ -466,6 +538,261 @@ def run_claude(
         )
 
 
+def _codex_session_id(events: list[dict]) -> Optional[str]:
+    """Extract a Codex session ID from tolerant JSONL event shapes."""
+    for data in events:
+        if not isinstance(data, dict):
+            continue
+        for key in ("session_id", "sessionId", "id"):
+            value = data.get(key)
+            if isinstance(value, str) and value:
+                return value
+    return None
+
+
+def _codex_text_from_events(events: list[dict]) -> str:
+    """Best-effort fallback text extraction from Codex JSONL events."""
+    parts: list[str] = []
+    for data in events:
+        if not isinstance(data, dict):
+            continue
+        for key in ("result", "message", "text", "output"):
+            value = data.get(key)
+            if isinstance(value, str) and value.strip():
+                parts.append(value)
+    return "\n".join(parts)
+
+
+def _codex_result_event_seen(events: list[dict], last_message: str) -> bool:
+    if last_message.strip():
+        return True
+    result_types = {
+        "result",
+        "completed",
+        "complete",
+        "task_complete",
+        "turn_complete",
+        "agent_message",
+        "response.completed",
+    }
+    for data in events:
+        if isinstance(data, dict) and str(data.get("type", "")).lower() in result_types:
+            return True
+    return False
+
+
+def _codex_result_is_error(events: list[dict]) -> bool:
+    error_types = {"error", "failed", "failure", "response.failed"}
+    for data in events:
+        if not isinstance(data, dict):
+            continue
+        if data.get("is_error") is True:
+            return True
+        if str(data.get("type", "")).lower() in error_types:
+            return True
+    return False
+
+
+def _count_codex_tool_events(events: list[dict]) -> int:
+    """Count obvious Codex tool events, failing closed at zero when unclassified."""
+    count = 0
+    tool_markers = ("tool", "exec", "patch", "command")
+    for data in events:
+        if not isinstance(data, dict):
+            continue
+        event_type = str(data.get("type", "")).lower()
+        item_type = str(data.get("item_type", data.get("itemType", ""))).lower()
+        if any(marker in event_type for marker in tool_markers) or any(
+            marker in item_type for marker in tool_markers
+        ):
+            count += 1
+    return count
+
+
+def run_codex(
+    prompt: str,
+    cwd: Optional[str] = None,
+    session_id: Optional[str] = None,
+    timeout: int = 1800,
+    model: Optional[str] = None,
+    append_system_prompt: Optional[str] = None,
+    disable_tools: bool = False,
+) -> SessionResult:
+    """
+    Run Codex non-interactively for GPT-family models.
+
+    Codex exec does not expose a true no-tools flag. When ``disable_tools`` is
+    requested, use a read-only sandbox and do not bypass approvals so parsing
+    and model-check prompts cannot silently run with workspace write access.
+    """
+    cwd = cwd or os.getcwd()
+    model = resolve_agent_model(model)
+    prompt_parts = []
+    if append_system_prompt:
+        prompt_parts.append(append_system_prompt.strip())
+    prompt_parts.append(prompt)
+    final_prompt = "\n\n".join(part for part in prompt_parts if part)
+
+    with tempfile.NamedTemporaryFile(prefix="dvx-codex-last-", suffix=".txt", delete=False) as output_file:
+        last_message_path = output_file.name
+
+    cmd = [
+        "codex",
+        "exec",
+        "--model",
+        model,
+        "--cd",
+        cwd,
+    ]
+    if disable_tools:
+        cmd.extend([
+            "--sandbox",
+            "read-only",
+            "-c",
+            'approval_policy="never"',
+        ])
+    else:
+        cmd.extend([
+            "--sandbox",
+            "danger-full-access",
+            "--dangerously-bypass-approvals-and-sandbox",
+        ])
+    cmd.extend([
+        "-c",
+        f'model_reasoning_effort="{CODEX_EFFORT}"',
+        "--json",
+        "--output-last-message",
+        last_message_path,
+    ])
+    if session_id:
+        logger.debug("Ignoring session_id for codex exec; sessions are non-interactive per invocation")
+    cmd.append(final_prompt)
+
+    logger.info(f"Running codex in {cwd}")
+    logger.debug(f"Command: {' '.join(cmd[:-1])} <prompt>")
+    logger.debug(f"Prompt: {final_prompt[:200]}...")
+
+    try:
+        completed = subprocess.run(
+            cmd,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+
+        stream_events: list[dict] = []
+        raw_lines: list[str] = []
+        for raw in completed.stdout.splitlines():
+            if not raw.strip():
+                continue
+            raw_lines.append(raw)
+            try:
+                event = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict):
+                stream_events.append(event)
+
+        last_message = ""
+        try:
+            with open(last_message_path, "r", encoding="utf-8", errors="replace") as f:
+                last_message = f.read().strip()
+        except FileNotFoundError:
+            last_message = ""
+
+        event_text = _codex_text_from_events(stream_events)
+        output = last_message or event_text or completed.stdout.strip()
+        blocked, block_reason = _blocked_marker_from_text(output)
+        is_error = _codex_result_is_error(stream_events)
+        failure_reason = None
+        if completed.returncode != 0 or is_error:
+            detail = (
+                completed.stderr.strip()
+                or output.strip()
+                or "\n".join(raw_lines).strip()
+                or "unknown error"
+            )
+            failure_reason = f"codex exited with status {completed.returncode}: {detail}"
+
+        if completed.stderr.strip():
+            logger.warning(f"Codex stderr: {completed.stderr.strip()}")
+
+        return SessionResult(
+            output=output,
+            session_id=_codex_session_id(stream_events) or session_id,
+            success=completed.returncode == 0 and not is_error,
+            blocked=blocked or failure_reason is not None,
+            block_reason=block_reason or failure_reason,
+            tool_use_count=_count_codex_tool_events(stream_events),
+            result_event_seen=_codex_result_event_seen(stream_events, last_message),
+        )
+    except subprocess.TimeoutExpired:
+        logger.error(f"Codex timed out after {timeout}s")
+        return SessionResult(
+            output="",
+            session_id=session_id,
+            success=False,
+            blocked=True,
+            block_reason="Timeout - codex session took too long",
+        )
+    except FileNotFoundError:
+        logger.error("codex command not found - is Codex CLI installed?")
+        return SessionResult(
+            output="",
+            session_id=None,
+            success=False,
+            blocked=True,
+            block_reason="codex command not found",
+        )
+    except Exception as e:
+        logger.error(f"Error running codex: {e}")
+        return SessionResult(
+            output="",
+            session_id=session_id,
+            success=False,
+            blocked=True,
+            block_reason=str(e),
+        )
+    finally:
+        try:
+            os.unlink(last_message_path)
+        except OSError:
+            pass
+
+
+def run_agent(
+    prompt: str,
+    cwd: Optional[str] = None,
+    session_id: Optional[str] = None,
+    timeout: int = 1800,
+    model: Optional[str] = None,
+    append_system_prompt: Optional[str] = None,
+    disable_tools: bool = False,
+) -> SessionResult:
+    """Dispatch a non-interactive prompt to Claude or Codex based on model family."""
+    selected = resolve_agent_model(model)
+    if is_gpt_model(selected):
+        return run_codex(
+            prompt=prompt,
+            cwd=cwd,
+            session_id=session_id,
+            timeout=timeout,
+            model=selected,
+            append_system_prompt=append_system_prompt,
+            disable_tools=disable_tools,
+        )
+    return run_claude(
+        prompt=prompt,
+        cwd=cwd,
+        session_id=session_id,
+        timeout=timeout,
+        model=selected,
+        append_system_prompt=append_system_prompt,
+        disable_tools=disable_tools,
+    )
+
+
 def start_session(prompt: str, cwd: Optional[str] = None) -> SessionResult:
     """Start a new Claude session."""
     return run_claude(prompt, cwd=cwd, session_id=None)
@@ -505,7 +832,7 @@ def launch_interactive(
     cwd = cwd or os.getcwd()
     model = resolve_claude_model(model)
 
-    cmd = ['claude', '--dangerously-skip-permissions']
+    cmd = ['claude', '--dangerously-skip-permissions', '--effort', CLAUDE_EFFORT]
     if model:
         cmd.extend(['--model', model])
     if session_id:

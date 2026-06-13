@@ -13,7 +13,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
-from claude_session import run_claude
+from claude_session import run_agent as run_claude
 
 logger = logging.getLogger(__name__)
 
