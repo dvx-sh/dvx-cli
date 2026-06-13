@@ -55,7 +55,7 @@ The `dvx` CLI provides these commands:
 | `dvx run <queue.yaml>` | Run multiple plans sequentially from a YAML queue |
 | `dvx interview <task>` | Run a deep-interview session that produces an execution-ready spec |
 | `dvx autopilot <task>` | Sequence interview → consensus plan → run end-to-end |
-| `dvx watch` | Watch the todo directory; GOAL*.md uses /goal, other files use dvx run |
+| `dvx watch` | Watch the todo directory; regular files use dvx run |
 | `dvx watch --model <model>` | Override watcher work model (default: claude-opus-4-8; `gpt-*` uses Codex, `DVX_MODEL` also supported) |
 | `dvx run --model <model> <plan>` | Override non-interactive run model (default: claude-opus-4-8; `gpt-*` uses Codex except saved blocked-state recovery) |
 | `dvx clear` | Clear watch-processing state (leaves the watched directory untouched) |
