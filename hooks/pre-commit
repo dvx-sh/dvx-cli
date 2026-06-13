@@ -1,6 +1,6 @@
 #!/bin/bash
 # Pre-commit hook for dvx-cli
-# Runs linting and tests before allowing commit
+# Runs fast checks on topic branches and full checks on protected branches.
 
 set -e
 
@@ -15,6 +15,38 @@ cd "$(git rev-parse --show-toplevel)/dvx"
 
 # uv resolves the dev tools (ruff, pytest, invoke) from uv.lock, so the
 # checks never depend on whatever happens to be on the caller's PATH.
-uv run --extra dev invoke check
+branch="$(git symbolic-ref --quiet --short HEAD || true)"
+branch="${branch:-detached}"
+protected_branches="${DVX_PRECOMMIT_PROTECTED_BRANCHES:-main master}"
+
+is_protected_branch() {
+    for protected_branch in $protected_branches; do
+        if [ "$branch" = "$protected_branch" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+run_full_checks=0
+full_check_reason=""
+if [ "${DVX_PRECOMMIT_FULL:-}" = "1" ]; then
+    run_full_checks=1
+    full_check_reason="DVX_PRECOMMIT_FULL=1"
+elif is_protected_branch; then
+    run_full_checks=1
+    full_check_reason="protected branch '$branch'"
+fi
+
+echo "Running fast checks (ruff)..."
+uv run --extra dev invoke lint
+
+if [ "$run_full_checks" = "1" ]; then
+    echo "Running full checks for ${full_check_reason}..."
+    uv run --extra dev invoke tests
+else
+    echo "Skipping full tests on branch '$branch'."
+    echo "Set DVX_PRECOMMIT_FULL=1 or commit on one of: $protected_branches"
+fi
 
 echo "Pre-commit checks passed!"
