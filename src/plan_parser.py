@@ -83,7 +83,6 @@ def _save_status_override(plan_filepath: Path, task_id: str, status: TaskStatus)
     # Ensure .dvx directory exists
     status_file.parent.mkdir(exist_ok=True)
 
-    # Load existing
     if status_file.exists():
         try:
             data = json.loads(status_file.read_text())
@@ -335,7 +334,7 @@ Important:
             logger.warning(f"Claude returned empty output (attempt {attempt + 1}/{max_retries})")
             if attempt < max_retries - 1:
                 import time
-                time.sleep(2)  # Brief delay before retry
+                time.sleep(2)
                 continue
             else:
                 raise RuntimeError("Claude returned empty output after all retries")
@@ -348,7 +347,7 @@ Important:
 
         try:
             data = json.loads(output)
-            break  # Success - exit retry loop
+            break
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse Claude's JSON response (attempt {attempt + 1}/{max_retries}): {e}")
             logger.error(f"Raw output: {output[:500]}")
