@@ -1,6 +1,6 @@
 # PLAN: Add STOP Macro
 
-**Status:** Planned
+**Status:** Implemented (on branch `add-sync-and-stop-macros`, pending merge)
 **Type:** Feature — new control macro for `dvx watch`
 **Affects:** `dvx/src/goals.py`, `dvx/tests/test_goals.py`, `README.md`
 
