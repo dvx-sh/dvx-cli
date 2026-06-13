@@ -875,18 +875,19 @@ def cmd_run(args) -> int:
 
 def cmd_watch(args) -> int:
     """
-    Watch the goals directory and process GOAL-*.md files one at a time.
+    Watch the work directory and process files one at a time.
 
-    Each goal is queued in .dvx/watch/state.json, worked on its own branch
-    by Claude Code (Fable 5, /goal command), committed in logical groups,
-    merged back into the branch watch started on (which is then pushed to
-    its remote, when one exists), and cleaned up. All state transitions are
-    persisted atomically so the watcher recovers from a crash or kill at
-    any point - just re-run `dvx watch`.
+    Each watched file is queued in .dvx/watch/state.json and worked on in its
+    own branch by Claude Code (Fable 5). GOAL*.md files use the /goal command;
+    all other files use the same loop as `dvx run`. Changes are committed,
+    merged back into the branch watch started on (which is then pushed to its
+    remote, when one exists), and cleaned up. All state transitions are
+    persisted atomically so the watcher recovers from a crash or kill at any
+    point - just re-run `dvx watch`.
 
-    Dropping a MERGE file in the goals directory merges the watch branch
+    Dropping a MERGE file in the watched directory merges the watch branch
     into the remote's default branch (empty file) or the branch named in
-    the file. The merge runs between goals, ahead of the queue.
+    the file. The merge runs between watched items, ahead of the queue.
     """
     ok, branch_or_error = check_watch_git_environment()
     if not ok:
@@ -909,15 +910,15 @@ def cmd_watch(args) -> int:
 
 def cmd_clear(args) -> int:
     """
-    Clear all goal-processing state, leaving the goals directory untouched.
+    Clear all watch-processing state, leaving the watched directory untouched.
 
-    Running `dvx watch` afterwards re-discovers the goal files and starts
+    Running `dvx watch` afterwards re-discovers the work files and starts
     processing them from scratch.
     """
     if clear_goal_state():
-        print("Cleared goal state (.dvx/watch/). Goal files were left in place.")
+        print("Cleared watch state (.dvx/watch/). Work files were left in place.")
     else:
-        print("No goal state to clear.")
+        print("No watch state to clear.")
     return 0
 
 
@@ -1043,32 +1044,32 @@ def main() -> int:
     watch_parser = subparsers.add_parser(
         "watch",
         help=(
-            "Watch the goals directory and process GOAL-*.md files with Claude Code "
+            "Watch a work directory and process GOAL*.md via /goal, other files via dvx run "
             "(a MERGE file there merges the watch branch into a remote branch)"
         ),
     )
     watch_parser.add_argument(
         "--goals",
         default=DEFAULT_GOALS_DIR,
-        help=f"Directory to watch for GOAL-*.md files (default: {DEFAULT_GOALS_DIR})",
+        help=f"Directory to watch for work files (default: {DEFAULT_GOALS_DIR})",
     )
     watch_parser.add_argument(
         "--poll-interval",
         type=float,
         default=DEFAULT_POLL_INTERVAL,
-        help="Seconds between checks for new goal files",
+        help="Seconds between checks for new work files",
     )
     watch_parser.add_argument(
         "--once",
         action="store_true",
-        help="Process pending goals and exit instead of waiting for new ones",
+        help="Process pending work files and exit instead of waiting for new ones",
     )
     watch_parser.set_defaults(func=cmd_watch)
 
     # clear
     clear_parser = subparsers.add_parser(
         "clear",
-        help="Clear goal-processing state (leaves the goals directory untouched)",
+        help="Clear watch-processing state (leaves the watched directory untouched)",
     )
     clear_parser.set_defaults(func=cmd_clear)
 

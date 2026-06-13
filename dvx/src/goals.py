@@ -1,25 +1,30 @@
 """
-Goal queue processing for `dvx watch`.
+Watched work queue processing for `dvx watch`.
 
-Watches a goals directory (default .dvx/goals/) for GOAL-*.md files and
-processes them one at a time: each goal gets its own working branch, is
-handed to Claude Code (Fable 5) via the /goal command, and is merged back
-into the branch that was active when the watcher started, which is then
-pushed to its remote (when one exists) so remote reviewers see the work.
+Watches a work directory (default .dvx/goals/) and processes files one at a
+time: each file gets its own working branch, is handed to Claude Code (Fable 5),
+and is merged back into the branch that was active when the watcher started,
+which is then pushed to its remote (when one exists) so remote reviewers see
+the work.
+
+GOAL*.md files keep the dedicated /goal flow. Every other regular file uses the
+current dvx run loop, with the watched input copied to a stable .dvx/watch/
+snapshot before the run starts so the live inbox file is never part of the work
+branch commits.
 
 The watched directory lives under .dvx/ so it is created by dvx itself and
-is already gitignored - other sessions can queue work simply by dropping
-GOAL-*.md files there. Watcher state lives separately in
+is already gitignored - other sessions can queue work simply by dropping files
+there. Watcher state lives separately in
 .dvx/watch/state.json (outside the watched directory) and is written atomically
 (temp file + os.replace), so the watcher can be killed or crash at any
 point and `dvx watch` will recover and continue from the last completed
 step.
 
-The goals directory also accepts one control file: MERGE. Dropping it asks
+The watched directory also accepts one control file: MERGE. Dropping it asks
 the watcher to merge the watch branch into a remote branch - empty file
 means the remote's default branch; otherwise the file holds a single branch
-name (e.g. "dev"). The merge runs between goals: after the in-flight goal
-finishes (if any) and before the next queued goal starts. The remote target
+name (e.g. "dev"). The merge runs between items: after the in-flight item
+finishes (if any) and before the next queued item starts. The remote target
 is brought into the watch branch first (Claude resolves conflicts), then
 the target is fast-forwarded to the watch branch tip - never force-pushed -
 so if another process advances the target mid-merge, the push is rejected
@@ -48,10 +53,13 @@ logger = logging.getLogger(__name__)
 GOALS_STATE_NAME = "watch"
 GOALS_STATE_FILE = "state.json"
 CURRENT_GOAL_CONTENT_FILE = "current-goal.md"
+RUN_ITEM_CONTENT_DIR = "run-items"
 QUEUED_GOAL_SNAPSHOT_DIR = "queued-goals"
 QUEUED_GOAL_SNAPSHOT_MANIFEST = "manifest.json"
-GOAL_FILE_GLOB = "GOAL-*.md"
+WATCH_FILE_GLOB = "*"
 GOAL_MODEL = "claude-fable-5"
+ITEM_TYPE_GOAL = "goal"
+ITEM_TYPE_RUN = "run"
 GOAL_TIMEOUT_SECONDS = 4 * 60 * 60
 # The built-in /goal command caps its condition argument; passing whole goal
 # files inline trips it, so the condition references the snapshot file instead.
@@ -61,7 +69,7 @@ COMMIT_TIMEOUT_SECONDS = 30 * 60
 DEFAULT_GOALS_DIR = ".dvx/goals"
 DEFAULT_POLL_INTERVAL = 2.0
 
-# Control file in the goals directory that requests a merge of the watch
+# Control file in the watched directory that requests a merge of the watch
 # branch into a remote branch. Empty file = the remote's default branch;
 # otherwise the file contains a single branch name (e.g. "dev").
 MERGE_FILE_NAME = "MERGE"
@@ -79,6 +87,7 @@ STATUS_RAN = "ran"                    # Claude Code finished the /goal session
 STATUS_GOAL_DELETED = "goal_deleted"  # goal file removed from goals dir
 STATUS_COMMITTED = "committed"        # all changes committed on working branch
 STATUS_MERGED = "merged"              # working branch merged into watch branch
+RUN_PREREQ_STATUSES = {STATUS_CLAIMED, STATUS_BRANCHED}
 
 # Step statuses for a pending merge request (MERGE control file). Same
 # convention as goal statuses: each names the step that has COMPLETED.
@@ -145,8 +154,8 @@ def save_goal_state(state: GoalState, project_dir: Optional[str] = None) -> None
 
 def clear_goal_state(project_dir: Optional[str] = None) -> bool:
     """
-    Remove all goal-processing state. The goals directory itself is left
-    untouched so a subsequent `dvx watch` re-discovers the goal files.
+    Remove all watch-processing state. The watched directory itself is left
+    untouched so a subsequent `dvx watch` re-discovers the work files.
 
     Returns True if there was state to clear.
     """
@@ -159,6 +168,37 @@ def clear_goal_state(project_dir: Optional[str] = None) -> bool:
 
 def current_goal_content_file(project_dir: Optional[str] = None) -> Path:
     return goals_state_dir(project_dir) / CURRENT_GOAL_CONTENT_FILE
+
+
+def _new_run_item_content_file(
+    goal_file_name: str,
+    content: str,
+    project_dir: Optional[str] = None,
+) -> Path:
+    """Create a unique per-item snapshot path for the dvx run state namespace."""
+    branch_slug = branch_name_for_goal(goal_file_name)
+    nonce = datetime.now().isoformat()
+    digest = _content_sha256(f"{goal_file_name}\0{content}\0{nonce}")[:12]
+    suffix = Path(goal_file_name).suffix or ".md"
+    return goals_state_dir(project_dir) / RUN_ITEM_CONTENT_DIR / f"{branch_slug}-{digest}{suffix}"
+
+
+def _claim_content_file(
+    goal_file_name: str,
+    item_type: str,
+    content: str,
+    project_dir: Optional[str] = None,
+) -> Path:
+    if item_type == ITEM_TYPE_GOAL:
+        return current_goal_content_file(project_dir)
+    return _new_run_item_content_file(goal_file_name, content, project_dir)
+
+
+def _current_content_file(state: GoalState, project_dir: Optional[str] = None) -> Path:
+    stored = (state.current or {}).get("content_file")
+    if stored:
+        return Path(stored)
+    return current_goal_content_file(project_dir)
 
 
 def queued_goal_snapshot_dir(project_dir: Optional[str] = None) -> Path:
@@ -286,7 +326,7 @@ def _branch_has_watcher_ownership(state: GoalState) -> bool:
 
 
 def _branch_ownership_error(state: GoalState) -> str:
-    return f"Goal branch no longer has validated watcher ownership: {state.current['branch']}"
+    return f"Watched item branch no longer has validated watcher ownership: {state.current['branch']}"
 
 
 def checkout(branch: str) -> tuple[bool, str]:
@@ -346,7 +386,7 @@ def _non_excluded_paths(paths: list[str], prefixes: list[str]) -> list[str]:
 
 
 def _dirty_paths(goals_dir: str) -> list[str]:
-    """List uncommitted paths, excluding the goals directory and .dvx state."""
+    """List uncommitted paths, excluding the watched directory and .dvx state."""
     result = _git(["status", "--porcelain=v1", "-z"])
     if result.returncode != 0:
         raise RuntimeError(_git_error(result, "read git status"))
@@ -449,6 +489,27 @@ def run_goal_with_claude(
     )
 
 
+def run_item_with_orchestrator(plan_file: str, cwd: Optional[str] = None) -> SessionResult:
+    """Run the current dvx run flow for a watched non-GOAL input using Fable 5."""
+    previous_cwd = Path.cwd()
+    try:
+        if cwd is not None:
+            os.chdir(cwd)
+        from orchestrator import run_orchestrator
+
+        exit_code = run_orchestrator(plan_file, model=GOAL_MODEL)
+    finally:
+        if cwd is not None:
+            os.chdir(previous_cwd)
+
+    return SessionResult(
+        output=f"dvx run exited with status {exit_code}",
+        session_id=None,
+        success=exit_code == 0,
+        block_reason=None if exit_code == 0 else f"dvx run exited with status {exit_code}",
+    )
+
+
 def commit_logical_groups_with_claude(goals_dir: str, cwd: Optional[str] = None) -> SessionResult:
     """Ask Claude Code to commit all outstanding changes in logical groups."""
     prompt = (
@@ -495,11 +556,23 @@ def resolve_merge_conflicts_with_claude(
 # Queue management
 # ---------------------------------------------------------------------------
 
+def item_type_for_file(file_name: str) -> str:
+    """Classify watched inputs: GOAL*.md uses /goal; every other file uses dvx run."""
+    path = Path(file_name)
+    if path.name.startswith("GOAL") and path.suffix == ".md":
+        return ITEM_TYPE_GOAL
+    return ITEM_TYPE_RUN
+
+
 def scan_goal_files(goals_dir: Path) -> list[str]:
-    """List GOAL-*.md file names in arrival order (mtime, then name)."""
+    """List watched work file names in arrival order (mtime, then name)."""
     if not goals_dir.exists():
         return []
-    files = [p for p in goals_dir.glob(GOAL_FILE_GLOB) if p.is_file()]
+    files = [
+        p
+        for p in goals_dir.glob(WATCH_FILE_GLOB)
+        if p.is_file() and p.name != MERGE_FILE_NAME
+    ]
     files.sort(key=lambda p: (p.stat().st_mtime_ns, p.name))
     return [p.name for p in files]
 
@@ -547,7 +620,7 @@ def _queued_goal_snapshot_entries(project_dir: Optional[str] = None) -> tuple[li
     try:
         data = json.loads(manifest.read_text())
     except json.JSONDecodeError as e:
-        return [], f"Queued goal snapshot manifest is unreadable: {e}"
+        return [], f"Queued item snapshot manifest is unreadable: {e}"
     return data.get("goals", []), ""
 
 
@@ -576,7 +649,7 @@ def _verify_queued_goal_snapshots(
     manifest = queued_goal_snapshot_manifest_file(project_dir)
     if active_guard and not manifest.exists():
         return _queued_goal_guard_failure(state, project_dir, (
-            "Queued goal snapshot manifest is missing while a watcher runner guard is active. "
+            "Queued item snapshot manifest is missing while a watcher runner guard is active. "
             f"Live files were preserved; clean snapshots remain in {queued_goal_snapshot_dir(project_dir)}."
         ))
 
@@ -591,7 +664,7 @@ def _verify_queued_goal_snapshots(
         return False, error
     if active_guard and entries != active_guard.get("goals", []):
         return _queued_goal_guard_failure(state, project_dir, (
-            "Queued goal snapshot manifest changed while a watcher runner guard is active. "
+            "Queued item snapshot manifest changed while a watcher runner guard is active. "
             f"Live files were preserved; clean snapshots remain in {queued_goal_snapshot_dir(project_dir)}."
         ))
     if not entries:
@@ -628,7 +701,7 @@ def _verify_queued_goal_snapshots(
 
     if conflicts:
         message = (
-            "Queued goals changed while a watcher runner was active: "
+            "Queued items changed while a watcher runner was active: "
             f"{conflicts}. Live files were preserved; clean snapshots remain in "
             f"{queued_goal_snapshot_dir(project_dir)}."
         )
@@ -667,7 +740,7 @@ def _delete_queued_goal_snapshot(goal_file_name: str, project_dir: Optional[str]
 
 
 def enqueue_new_goals(state: GoalState, project_dir: Optional[str] = None) -> list[str]:
-    """Add newly arrived goal files to the queue. Returns the added names."""
+    """Add newly arrived watched files to the queue. Returns the added names."""
     known = set(state.queue)
     if state.current:
         known.add(state.current["goal_file"])
@@ -682,11 +755,11 @@ def enqueue_new_goals(state: GoalState, project_dir: Optional[str] = None) -> li
 
 def claim_next_goal(state: GoalState, project_dir: Optional[str] = None) -> Optional[dict]:
     """
-    Atomically claim the next goal in the queue as the current goal.
+    Atomically claim the next watched file in the queue as the current item.
 
-    Reviews the goal file (it must exist and be non-empty) and copies the
-    current goal contents into .dvx/watch/ so the run step can recover even if
-    the goal file is later deleted. Unusable goals are recorded in state.failed
+    Reviews the watched file (it must exist and be non-empty) and copies the
+    current contents into .dvx/watch/ so the run step can recover even if the
+    watched file is later deleted. Unusable files are recorded in state.failed
     and skipped.
     """
     if state.current:
@@ -695,12 +768,13 @@ def claim_next_goal(state: GoalState, project_dir: Optional[str] = None) -> Opti
     while state.queue:
         name = state.queue[0]
         goal_path = Path(state.goals_dir) / name
+        item_type = item_type_for_file(name)
 
         content = goal_path.read_text() if goal_path.exists() else ""
         reason = None
         branch = None
         if not content.strip():
-            reason = "missing" if not goal_path.exists() else "empty goal file"
+            reason = "missing" if not goal_path.exists() else "empty watched file"
         else:
             try:
                 branch = branch_name_for_goal(name)
@@ -714,6 +788,7 @@ def claim_next_goal(state: GoalState, project_dir: Optional[str] = None) -> Opti
             state.queue.pop(0)
             state.failed.append({
                 "goal_file": name,
+                "item_type": item_type,
                 "reason": reason,
                 "at": datetime.now().isoformat(),
             })
@@ -741,11 +816,15 @@ def claim_next_goal(state: GoalState, project_dir: Optional[str] = None) -> Opti
                 f"{dirty_baseline}"
             )
             return None
-        current_goal_content_file(project_dir).write_text(content)
+        content_file = _claim_content_file(name, item_type, content, project_dir)
+        content_file.parent.mkdir(parents=True, exist_ok=True)
+        content_file.write_text(content)
         state.queue.pop(0)
         _delete_queued_goal_snapshot(name, project_dir)
         state.current = {
             "goal_file": name,
+            "item_type": item_type,
+            "content_file": str(content_file),
             "branch": branch,
             "status": STATUS_CLAIMED,
             "branch_created_by_watcher": False,
@@ -806,29 +885,84 @@ def _step_create_branch(state: GoalState, project_dir: Optional[str] = None) -> 
 def _checkout_owned_goal_branch(state: GoalState) -> tuple[bool, str]:
     branch = state.current["branch"]
     if not branch_exists(branch):
-        return False, f"Goal branch does not exist: {branch}"
+        return False, f"Watch item branch does not exist: {branch}"
     if not _branch_has_watcher_ownership(state):
         return False, _branch_ownership_error(state)
     return checkout(branch)
 
 
+def _current_item_type(state: GoalState) -> str:
+    return state.current.get("item_type") or item_type_for_file(state.current["goal_file"])
+
+
+def _validate_runner_commits(state: GoalState) -> tuple[bool, str]:
+    base_oid = (state.current.get("branch_creation") or {}).get("base_oid")
+    if not base_oid:
+        return True, ""
+    return _validate_commits_did_not_include_excluded_paths(state, base_oid)
+
+
+def _migrate_legacy_run_content_file(
+    state: GoalState,
+    project_dir: Optional[str] = None,
+) -> tuple[bool, str]:
+    """
+    Rebind pre-upgrade non-GOAL watch state from the shared snapshot to a
+    per-item run snapshot before `dvx run` starts.
+    """
+    if not state.current or state.current.get("content_file"):
+        return True, ""
+    if _current_item_type(state) != ITEM_TYPE_RUN:
+        return True, ""
+    if state.current.get("status") not in RUN_PREREQ_STATUSES:
+        return True, ""
+
+    legacy_file = current_goal_content_file(project_dir)
+    used_legacy_file = legacy_file.exists()
+    if used_legacy_file:
+        content = legacy_file.read_text()
+    else:
+        goal_path = Path(state.goals_dir) / state.current["goal_file"]
+        if not goal_path.exists():
+            return False, f"Watched file contents unavailable for {state.current['goal_file']}"
+        content = goal_path.read_text()
+
+    content_file = _new_run_item_content_file(
+        state.current["goal_file"],
+        content,
+        project_dir,
+    )
+    content_file.parent.mkdir(parents=True, exist_ok=True)
+    content_file.write_text(content)
+    if used_legacy_file:
+        legacy_file.unlink(missing_ok=True)
+    state.current["content_file"] = str(content_file)
+    save_goal_state(state, project_dir)
+    return True, ""
+
+
 def _step_run_claude(
     state: GoalState,
     claude_runner: Callable[[str], SessionResult],
+    run_runner: Callable[[str], SessionResult],
     project_dir: Optional[str] = None,
 ) -> tuple[bool, str]:
     ok, error = _checkout_owned_goal_branch(state)
     if not ok:
         return False, error
 
-    content_file = current_goal_content_file(project_dir)
+    item_type = _current_item_type(state)
+    content_file = _current_content_file(state, project_dir)
     if content_file.exists():
         content = content_file.read_text()
     else:
         goal_path = Path(state.goals_dir) / state.current["goal_file"]
         if not goal_path.exists():
-            return False, f"Goal contents unavailable for {state.current['goal_file']}"
+            return False, f"Watched file contents unavailable for {state.current['goal_file']}"
         content = goal_path.read_text()
+        ensure_dvx_dir(GOALS_STATE_NAME, project_dir)
+        content_file.parent.mkdir(parents=True, exist_ok=True)
+        content_file.write_text(content)
 
     ok, error = _begin_queued_goal_guard(state, project_dir)
     if not ok:
@@ -836,25 +970,32 @@ def _step_run_claude(
     guard_ok = True
     guard_error = ""
     try:
-        result = claude_runner(content)
+        if item_type == ITEM_TYPE_GOAL:
+            result = claude_runner(content)
+        else:
+            result = run_runner(str(content_file))
     finally:
         guard_ok, guard_error = _finish_queued_goal_guard(state, project_dir)
     if not guard_ok:
         return False, guard_error
     if not result.success:
         return False, f"Claude Code failed: {result.block_reason or 'session did not succeed'}"
-    if GOAL_REJECTION_SIGNATURE in result.output:
-        return False, f"/goal rejected the goal: {result.output.strip()[:300]}"
-    if result.result_event_seen is False:
-        # A cleanly finished session always emits a result event; without one
-        # the session was cut short (rate limit, crash) and the goal cannot be
-        # trusted as done.
-        return False, "Goal session was truncated before finishing (no result event)"
-    if result.tool_use_count == 0:
-        # A goal session that never used a single tool cannot have done any
-        # work - treat it as a failure instead of silently completing.
-        summary = result.output.strip()[:300] or "<no output>"
-        return False, f"Goal session ended without doing any work (no tool use). Output: {summary}"
+    if item_type == ITEM_TYPE_GOAL:
+        if GOAL_REJECTION_SIGNATURE in result.output:
+            return False, f"/goal rejected the goal: {result.output.strip()[:300]}"
+        if result.result_event_seen is False:
+            # A cleanly finished session always emits a result event; without one
+            # the session was cut short (rate limit, crash) and the goal cannot be
+            # trusted as done.
+            return False, "Goal session was truncated before finishing (no result event)"
+        if result.tool_use_count == 0:
+            # A goal session that never used a single tool cannot have done any
+            # work - treat it as a failure instead of silently completing.
+            summary = result.output.strip()[:300] or "<no output>"
+            return False, f"Goal session ended without doing any work (no tool use). Output: {summary}"
+    ok, error = _validate_runner_commits(state)
+    if not ok:
+        return False, error
     return True, ""
 
 
@@ -879,7 +1020,8 @@ def _fallback_commit(state: GoalState) -> tuple[bool, str]:
     if staged.returncode != 1:
         return False, _git_error(staged, "inspect staged changes")
 
-    result = _git(["commit", "-m", f"goal: apply changes for {state.current['goal_file']}"])
+    item_type = _current_item_type(state)
+    result = _git(["commit", "-m", f"{item_type}: apply changes for {state.current['goal_file']}"])
     if result.returncode != 0:
         return False, _git_error(result, "commit goal changes")
     return True, ""
@@ -1032,7 +1174,7 @@ def _push_watch_branch(state: GoalState) -> tuple[bool, str]:
 def _step_merge(state: GoalState) -> tuple[bool, str]:
     branch = state.current["branch"]
     if not branch_exists(branch):
-        return False, f"Goal branch does not exist: {branch}"
+        return False, f"Watch item branch does not exist: {branch}"
     if not _branch_has_watcher_ownership(state):
         return False, _branch_ownership_error(state)
 
@@ -1040,7 +1182,7 @@ def _step_merge(state: GoalState) -> tuple[bool, str]:
     if not ok:
         return False, error
 
-    message = f"Merge branch '{branch}' (goal: {state.current['goal_file']})"
+    message = f"Merge branch '{branch}' ({_current_item_type(state)}: {state.current['goal_file']})"
     result = _git(["merge", "--no-ff", "-m", message, branch])
     if result.returncode != 0:
         _git(["merge", "--abort"])
@@ -1055,7 +1197,7 @@ def _step_finish(state: GoalState, project_dir: Optional[str] = None) -> tuple[b
         if not _branch_has_watcher_ownership(state):
             return False, f"Refusing to delete branch without watcher ownership: {branch}"
         if not _is_ancestor(branch, state.watch_branch):
-            return False, f"Goal branch is not fully merged into {state.watch_branch}: {branch}"
+            return False, f"Watch item branch is not fully merged into {state.watch_branch}: {branch}"
         ok, error = checkout(state.watch_branch)
         if not ok:
             return False, error
@@ -1067,9 +1209,10 @@ def _step_finish(state: GoalState, project_dir: Optional[str] = None) -> tuple[b
         if not ok:
             return False, error
 
-    current_goal_content_file(project_dir).unlink(missing_ok=True)
+    _current_content_file(state, project_dir).unlink(missing_ok=True)
     state.completed.append({
         "goal_file": state.current["goal_file"],
+        "item_type": _current_item_type(state),
         "branch": branch,
         "finished_at": datetime.now().isoformat(),
     })
@@ -1081,11 +1224,12 @@ def _step_finish(state: GoalState, project_dir: Optional[str] = None) -> tuple[b
 def process_current_goal(
     state: GoalState,
     claude_runner: Optional[Callable[[str], SessionResult]] = None,
+    run_runner: Optional[Callable[[str], SessionResult]] = None,
     commit_runner: Optional[Callable[[str], SessionResult]] = None,
     project_dir: Optional[str] = None,
 ) -> tuple[bool, str]:
     """
-    Drive the current goal through its remaining steps.
+    Drive the current watched item through its remaining steps.
 
     The status field records the last COMPLETED step, so this can resume
     after a crash at any point. Returns (ok, error).
@@ -1093,11 +1237,20 @@ def process_current_goal(
     if claude_runner is None:
         def claude_runner(content):
             return run_goal_with_claude(content, project_dir=project_dir)
+    if run_runner is None:
+        def run_runner(plan_file):
+            return run_item_with_orchestrator(plan_file, cwd=project_dir)
     commit_runner = commit_runner or commit_logical_groups_with_claude
+    ok, error = _migrate_legacy_run_content_file(state, project_dir)
+    if not ok:
+        return False, error
 
     transitions = {
         STATUS_CLAIMED: (lambda: _step_create_branch(state, project_dir), STATUS_BRANCHED),
-        STATUS_BRANCHED: (lambda: _step_run_claude(state, claude_runner, project_dir), STATUS_RAN),
+        STATUS_BRANCHED: (
+            lambda: _step_run_claude(state, claude_runner, run_runner, project_dir),
+            STATUS_RAN,
+        ),
         STATUS_RAN: (lambda: _step_delete_goal_file(state), STATUS_GOAL_DELETED),
         STATUS_GOAL_DELETED: (lambda: _step_commit(state, commit_runner, project_dir), STATUS_COMMITTED),
         STATUS_COMMITTED: (lambda: _step_merge(state), STATUS_MERGED),
@@ -1432,21 +1585,22 @@ def run_goal_watch(
     poll_interval: float = DEFAULT_POLL_INTERVAL,
     once: bool = False,
     claude_runner: Optional[Callable[[str], SessionResult]] = None,
+    run_runner: Optional[Callable[[str], SessionResult]] = None,
     commit_runner: Optional[Callable[[str], SessionResult]] = None,
     merge_runner: Optional[Callable[[str], SessionResult]] = None,
     project_dir: Optional[str] = None,
 ) -> int:
     """
-    Watch the goals directory and process goals until interrupted.
+    Watch the work directory and process queued files until interrupted.
 
     Saved state is recovered only when it has resumable work (an in-flight,
     blocked, or queued goal, or a pending merge request) — an idle state file
     from a previous run is discarded so each watch starts from the branch it
-    was launched on. An in-flight goal resumes at the step after the last one
-    recorded, then the queue continues. A MERGE control file in the goals
-    directory is claimed between goals and processed before the next queued
-    goal. With once=True, returns as soon as there is no pending work (used
-    by tests).
+    was launched on. An in-flight item resumes at the step after the last one
+    recorded, then the queue continues. A MERGE control file in the watched
+    directory is claimed between items and processed before the next queued
+    item. With once=True, returns as soon as there is no pending work (used by
+    tests).
     """
     Path(goals_dir).mkdir(parents=True, exist_ok=True)
 
@@ -1481,14 +1635,14 @@ def run_goal_watch(
                 f"after step '{state.merge['status']}'"
             )
         if state.goals_dir != goals_dir:
-            print(f"Using goals directory from saved state: {state.goals_dir}")
+            print(f"Using watched directory from saved state: {state.goals_dir}")
 
-    print(f"Watching for {GOAL_FILE_GLOB} files in: {state.goals_dir}")
+    print(f"Watching for work files in: {state.goals_dir}")
 
     while True:
         added = enqueue_new_goals(state, project_dir)
         for name in added:
-            print(f"Queued goal: {name}")
+            print(f"Queued {item_type_for_file(name)} item: {name}")
 
         should_claim = True
         if state.current is None and state.merge is None and state.blocked:
@@ -1497,8 +1651,8 @@ def run_goal_watch(
                 print(f"Error: {error}")
                 return 1
 
-        # A MERGE request runs between goals and takes precedence over the
-        # queued goals: claim it before claiming the next goal.
+        # A MERGE request runs between work items and takes precedence over the
+        # queue: claim it before claiming the next item.
         if state.current is None and state.merge is None and should_claim:
             claimed_merge, error = claim_merge_request(state, project_dir)
             if error:
@@ -1529,15 +1683,19 @@ def run_goal_watch(
         if state.current is None and should_claim and not merge_blocked:
             claimed = claim_next_goal(state, project_dir)
             if claimed:
-                print(f"Working on goal: {claimed['goal_file']} (branch: {claimed['branch']})")
+                print(
+                    f"Working on {claimed.get('item_type', item_type_for_file(claimed['goal_file']))} "
+                    f"item: {claimed['goal_file']} (branch: {claimed['branch']})"
+                )
             elif state.blocked:
-                print(f"Blocked goal {state.blocked['goal_file']}: {state.blocked['reason']}")
+                print(f"Blocked item {state.blocked['goal_file']}: {state.blocked['reason']}")
                 print(f"Dirty paths: {state.blocked['dirty_paths']}")
 
         if state.current:
             ok, error = process_current_goal(
                 state,
                 claude_runner=claude_runner,
+                run_runner=run_runner,
                 commit_runner=commit_runner,
                 project_dir=project_dir,
             )
@@ -1545,7 +1703,7 @@ def run_goal_watch(
                 print(f"Error: {error}")
                 print("State preserved - re-run `dvx watch` to retry from the failed step.")
                 return 1
-            print(f"Goal complete and merged into {state.watch_branch}.")
+            print(f"Item complete and merged into {state.watch_branch}.")
             continue
 
         if state.blocked:

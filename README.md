@@ -24,7 +24,7 @@ In a separate terminal, in your project directory:
 dvx watch
 ```
 
-It watches `.dvx/goals/` for `GOAL-*.md` files; each goal gets its own branch, a headless Claude session implements it, and changes are committed in logical groups and merged back. A killed watcher resumes where it left off (`dvx clear` resets watcher state). The watcher only claims goals when the working tree is clean — commit or stash first; blocked goals are reported along with the dirty paths. Merges land on the branch the watcher was started on, which is then pushed to its remote (when one exists) — run the watcher on a dedicated branch and review the work there; nothing touches main unless you start the watcher on main. Each goal file specifies verification commands the implementer must pass before it can finish.
+It watches `.dvx/goals/` for work files. `GOAL*.md` files keep the `/goal` flow; any other regular file (`PLAN*.md`, `TASK*.md`, `TODO*.md`, `.txt`, etc.) runs through the same loop as `dvx run`. Each file gets its own branch, a headless Claude session implements it with the Fable 5 model, and changes are committed in logical groups and merged back. A killed watcher resumes where it left off (`dvx clear` resets watcher state). The watcher only claims files when the working tree is clean — commit or stash first; blocked files are reported along with the dirty paths. Merges land on the branch the watcher was started on, which is then pushed to its remote (when one exists) — run the watcher on a dedicated branch and review the work there; nothing touches main unless you start the watcher on main.
 
 ## Queue a goal
 
@@ -49,7 +49,7 @@ touch .dvx/goals/MERGE            # merge into the default branch
 echo dev > .dvx/goals/MERGE       # merge into origin/dev
 ```
 
-The merge runs between goals — after the in-flight goal finishes (if any) and before the next queued one; it takes precedence over the queue. The watcher fetches, merges the remote target into the watch branch (a Claude session resolves any conflicts), fast-forwards the remote target to the watch branch tip — never force-pushed, so if the target advances mid-merge the watcher re-fetches and re-merges instead of clobbering it — then pushes the watch branch. The MERGE file is consumed when claimed. Like goals, the merge only starts on a clean working tree, and it requires a git remote with the target branch already on it.
+The merge runs between queued files — after the in-flight item finishes (if any) and before the next queued one; it takes precedence over the queue. The watcher fetches, merges the remote target into the watch branch (a Claude session resolves any conflicts), fast-forwards the remote target to the watch branch tip — never force-pushed, so if the target advances mid-merge the watcher re-fetches and re-merges instead of clobbering it — then pushes the watch branch. The MERGE file is consumed when claimed. Like queued files, the merge only starts on a clean working tree, and it requires a git remote with the target branch already on it.
 
 ## Requirements
 
