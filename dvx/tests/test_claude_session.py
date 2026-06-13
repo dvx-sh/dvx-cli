@@ -17,6 +17,7 @@ from claude_session import (
     _parse_stream_event,
     _parse_stream_output,
     _result_is_error,
+    claude_model_override,
     run_claude,
 )
 
@@ -110,6 +111,22 @@ class TestRunClaudeStreaming:
         assert result.success is False
         assert result.blocked is True
         assert "Timeout" in result.block_reason
+
+    def test_model_override_replaces_call_specific_model(self, monkeypatch, tmp_path):
+        self._with_stub_on_path(monkeypatch, tmp_path, """
+            import json
+            import sys
+            print(json.dumps({"type": "result", "result": json.dumps(sys.argv),
+                              "session_id": "sid-model"}))
+        """)
+
+        with claude_model_override("claude-fable-5"):
+            result = run_claude("hello", cwd=str(tmp_path), timeout=30, model="opus")
+
+        argv = json.loads(result.output)
+        model_index = argv.index("--model")
+        assert argv[model_index + 1] == "claude-fable-5"
+        assert "opus" not in argv
 
 
 class TestResultIsError:

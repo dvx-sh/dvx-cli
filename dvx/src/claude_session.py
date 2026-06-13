@@ -10,10 +10,34 @@ import logging
 import os
 import subprocess
 import threading
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+_CLAUDE_MODEL_OVERRIDE: ContextVar[Optional[str]] = ContextVar(
+    "_CLAUDE_MODEL_OVERRIDE",
+    default=None,
+)
+
+
+@contextmanager
+def claude_model_override(model: Optional[str]):
+    """Temporarily force all Claude CLI launches in this context to use one model."""
+    if model is None:
+        yield
+        return
+    token = _CLAUDE_MODEL_OVERRIDE.set(model)
+    try:
+        yield
+    finally:
+        _CLAUDE_MODEL_OVERRIDE.reset(token)
+
+
+def resolve_claude_model(model: Optional[str] = None) -> Optional[str]:
+    """Return the active scoped model override, or the call-specific model."""
+    return _CLAUDE_MODEL_OVERRIDE.get() or model
 
 
 @dataclass
@@ -231,6 +255,7 @@ def run_claude(
         SessionResult with output, session_id, and status
     """
     cwd = cwd or os.getcwd()
+    model = resolve_claude_model(model)
 
     cmd = ['claude', '--dangerously-skip-permissions', '--output-format', 'stream-json', '--verbose']
 
