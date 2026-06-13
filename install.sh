@@ -158,6 +158,9 @@ for file in pyproject.toml tasks.py uv.lock; do
     fi
 done
 
+# Copy the todo template so AI agents can reference it without curl
+cp "$DVX_PAYLOAD/TODO.md.example" "$DVX_HOME/TODO.md.example"
+
 # Make scripts executable
 chmod +x "$DVX_HOME/bin/"*
 

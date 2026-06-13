@@ -10,10 +10,9 @@ Paste this prompt into Claude Code in your project:
 Install dvx for me:
 
 1. Run: curl -fsSL https://raw.githubusercontent.com/dvx-sh/dvx-cli/main/install.sh | bash
-2. Download the goal template into this project:
-   curl -s https://raw.githubusercontent.com/dvx-sh/dvx-cli/main/GOAL.md.example -o GOAL.md.example
-3. Make sure ~/.dvx/bin is on my PATH. If it isn't, add this to my shell config:
+2. Make sure ~/.dvx/bin is on my PATH. If it isn't, add this to my shell config:
    export PATH="${HOME}/.dvx/bin:$PATH"
+3. Read ~/.dvx/TODO.md.example when creating work files for .dvx/todo/.
 ```
 
 ## Start the watcher
@@ -24,7 +23,7 @@ In a separate terminal, in your project directory:
 dvx watch
 ```
 
-It watches `.dvx/todo/` for work files. `GOAL*.md` files keep the Claude `/goal` flow for Claude models and use a Codex exec prompt for GPT models; any other regular file (`PLAN*.md`, `TASK*.md`, `TODO*.md`, `.txt`, etc.) runs through the same loop as `dvx run`. Outside of control files (`MERGE`, `SYNC`, `STOP`), files are processed oldest-first by file modification time, then filename. Each file gets its own branch, a headless agent session implements it with the configured model (default: `claude-opus-4-8`), and changes are committed in logical groups and merged back. A killed watcher resumes where it left off (`dvx clear` resets watcher state). The watcher only claims files when the working tree is clean — commit or stash first; blocked files are reported along with the dirty paths. Merges land on the branch the watcher was started on, which is then pushed to its remote (when one exists) — run the watcher on a dedicated branch and review the work there; nothing touches main unless you start the watcher on main.
+It watches `.dvx/todo/` for work files. Regular files (`TODO*.md`, `PLAN*.md`, `TASK*.md`, `.txt`, etc.) run through the same loop as `dvx run`. Outside of control files (`MERGE`, `SYNC`, `STOP`), files are processed oldest-first by file modification time, then filename. Each file gets its own branch, a headless agent session implements it with the configured model (default: `claude-opus-4-8`), and changes are committed in logical groups and merged back. A killed watcher resumes where it left off (`dvx clear` resets watcher state). The watcher only claims files when the working tree is clean — commit or stash first; blocked files are reported along with the dirty paths. Merges land on the branch the watcher was started on, which is then pushed to its remote (when one exists) — run the watcher on a dedicated branch and review the work there; nothing touches main unless you start the watcher on main.
 
 
 ### Agent model selection
@@ -44,17 +43,17 @@ dvx watch --model gpt-5.5
 Paste this prompt into Claude Code:
 
 ```
-Read GOAL.md.example, then create a well-scoped GOAL*.md file in .dvx/todo/ for this task:
+Read ~/.dvx/TODO.md.example, then create a well-scoped TODO*.md file in .dvx/todo/ for this task:
 
 <describe your task>
 
-The filename becomes the branch name (GOAL-my-change.md → branch goal-my-change).
-The goal file is the entire instruction set the implementer receives, so make it
+The filename becomes the branch name (TODO-my-change.md → branch todo-my-change).
+The work file is the entire instruction set the implementer receives, so make it
 self-contained.
 ```
 
-You can also drop non-GOAL work files into `.dvx/todo/`; those run through the
-same loop as `dvx run`.
+You can also drop `PLAN*.md`, `TASK*.md`, `FIX*.md`, `.txt`, or other regular
+work files into `.dvx/todo/`; those run through the same loop as `dvx run`.
 
 ## Merge the watch branch
 
