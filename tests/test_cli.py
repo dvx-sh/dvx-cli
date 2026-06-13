@@ -331,7 +331,7 @@ class TestRunCommandModel:
 
         monkeypatch.setattr("cli.run_orchestrator", fake_run_orchestrator)
 
-        result = cmd_run(SimpleNamespace(plan_file="PLAN-test.md", step=False, no_deslop=False, model="cli-model"))
+        result = cmd_run(SimpleNamespace(plan_file="PLAN-test.md", step=False, deslop=True, model="cli-model"))
 
         assert result == 0
         assert checked == ["cli-model"]
@@ -341,6 +341,29 @@ class TestRunCommandModel:
             "no_deslop": False,
             "model": "cli-model",
         }
+
+    def test_run_deslop_is_off_by_default_and_opt_in(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        Path("PLAN-test.md").write_text("# Plan\n- [ ] T1: Do work\n")
+        captured = {}
+        monkeypatch.setattr("cli._check_selected_model", lambda model: (True, ""))
+        monkeypatch.setattr("cli.sync_plan_state", lambda plan_file: {"synced": 0, "added": 0})
+        monkeypatch.setattr("cli.get_plan_summary", lambda plan_file: {"total": 1, "done": 0, "in_progress": 0, "pending": 1})
+        monkeypatch.setattr("cli.get_next_pending_task", lambda plan_file: SimpleNamespace(id="T1", title="Do work"))
+
+        def fake_run_orchestrator(plan_file, step_mode=False, no_deslop=False, model=None):
+            captured["no_deslop"] = no_deslop
+            return 0
+
+        monkeypatch.setattr("cli.run_orchestrator", fake_run_orchestrator)
+
+        # Default: deslop flag absent -> deslop pass is skipped.
+        cmd_run(SimpleNamespace(plan_file="PLAN-test.md", step=False, deslop=False, model="m"))
+        assert captured["no_deslop"] is True
+
+        # Opt-in: --deslop -> deslop pass runs.
+        cmd_run(SimpleNamespace(plan_file="PLAN-test.md", step=False, deslop=True, model="m"))
+        assert captured["no_deslop"] is False
 
     def test_run_uses_env_model_when_no_argument(self, monkeypatch):
         monkeypatch.chdir(self.temp_dir)
@@ -358,7 +381,7 @@ class TestRunCommandModel:
 
         monkeypatch.setattr("cli.run_orchestrator", fake_run_orchestrator)
 
-        result = cmd_run(SimpleNamespace(plan_file="PLAN-test.md", step=False, no_deslop=False, model=None))
+        result = cmd_run(SimpleNamespace(plan_file="PLAN-test.md", step=False, deslop=False, model=None))
 
         assert result == 0
         assert checked == ["env-model"]
@@ -388,7 +411,7 @@ class TestRunCommandModel:
             lambda plan_file: (_ for _ in ()).throw(AssertionError("should not clear")),
         )
 
-        result = cmd_run(SimpleNamespace(plan_file=plan_file, step=False, no_deslop=False, model="gpt-5.5"))
+        result = cmd_run(SimpleNamespace(plan_file=plan_file, step=False, deslop=False, model="gpt-5.5"))
 
         assert result == 1
         output = capsys.readouterr().out
