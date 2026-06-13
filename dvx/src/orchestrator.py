@@ -9,7 +9,16 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
-from claude_session import SessionResult, claude_model_override, resolve_claude_model, run_claude
+from claude_session import (
+    SessionResult,
+    claude_model_override,
+)
+from claude_session import (
+    resolve_agent_model as resolve_claude_model,
+)
+from claude_session import (
+    run_agent as run_claude,
+)
 from plan_parser import (
     Task,
     TaskStatus,

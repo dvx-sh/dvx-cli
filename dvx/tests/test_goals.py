@@ -139,6 +139,28 @@ class TestGoalPrompt:
         assert str(content_file) in prompt
         assert content_file.read_text() == big_goal
 
+    def test_gpt_goal_uses_codex_prompt_not_claude_slash_goal(self, monkeypatch, tmp_path):
+        captured = {}
+
+        def fake_run_claude(prompt, cwd=None, model=None, timeout=None):
+            captured["prompt"] = prompt
+            captured["model"] = model
+            return SessionResult(output="", session_id="s", success=True, tool_use_count=None)
+
+        monkeypatch.setattr(goals_module, "run_claude", fake_run_claude)
+
+        result = goals_module.run_goal_with_claude(
+            "Build with Codex.\n",
+            project_dir=str(tmp_path),
+            model="gpt-5.5",
+        )
+
+        assert result.success
+        assert captured["model"] == "gpt-5.5"
+        assert not captured["prompt"].startswith("/goal ")
+        assert "Make a concise plan" in captured["prompt"]
+        assert "Do not ask for user input" in captured["prompt"]
+
     def test_snapshot_file_rewritten_when_missing(self, tmp_path):
         prompt = goals_module.build_goal_prompt("Small goal.\n", project_dir=str(tmp_path))
         content_file = current_goal_content_file(str(tmp_path))
@@ -643,6 +665,46 @@ class TestProcessGoal(GitRepoTestCase):
             "model": DEFAULT_CLAUDE_MODEL,
         }
 
+    def test_run_item_with_orchestrator_preserves_gpt_model(self, monkeypatch):
+        captured = {}
+
+        def fake_run_orchestrator(plan_file, model=None):
+            captured["plan_file"] = plan_file
+            captured["model"] = model
+            return 0
+
+        monkeypatch.setattr("orchestrator.run_orchestrator", fake_run_orchestrator)
+
+        result = run_item_with_orchestrator("PLAN-do-work.md", model="gpt-5.5")
+
+        assert result.success
+        assert captured == {
+            "plan_file": "PLAN-do-work.md",
+            "model": "gpt-5.5",
+        }
+
+    def test_merge_conflict_resolution_preserves_gpt_model(self, monkeypatch):
+        captured = {}
+
+        def fake_run_claude(prompt, cwd=None, model=None, timeout=None):
+            captured["prompt"] = prompt
+            captured["model"] = model
+            captured["timeout"] = timeout
+            return SessionResult(output="", session_id="s", success=True, tool_use_count=1)
+
+        monkeypatch.setattr(goals_module, "run_claude", fake_run_claude)
+
+        result = goals_module.resolve_merge_conflicts_with_claude(
+            target="origin/main",
+            goals_dir=".dvx/todo",
+            model="gpt-5.5",
+        )
+
+        assert result.success
+        assert captured["model"] == "gpt-5.5"
+        assert "stopped on conflicts" in captured["prompt"]
+        assert ".dvx/todo" in captured["prompt"]
+
     def test_merge_pushes_watch_branch_to_origin(self, monkeypatch, tmp_path):
         monkeypatch.chdir(self.temp_dir)
         origin = tmp_path / "origin.git"
@@ -823,7 +885,7 @@ class TestProcessGoal(GitRepoTestCase):
         )
 
         assert ok is False
-        assert "Claude Code failed" in error
+        assert "Agent session failed" in error
         # The branch step completed; the run step did not - retry resumes there.
         assert state.current["status"] == STATUS_BRANCHED
         assert load_goal_state().current["status"] == STATUS_BRANCHED

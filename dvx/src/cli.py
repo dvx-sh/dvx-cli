@@ -28,8 +28,9 @@ from autopilot import (
     summarize as summarize_autopilot,
 )
 from claude_session import (
-    check_claude_model_available,
+    check_agent_model_available,
     claude_model_override,
+    is_gpt_model,
     launch_interactive,
     resolve_command_model,
     start_session,
@@ -94,7 +95,18 @@ def _selected_model_from_args(args) -> str:
 
 
 def _check_selected_model(model: str) -> tuple[bool, str]:
-    return check_claude_model_available(model)
+    return check_agent_model_available(model)
+
+
+def _check_selected_claude_model(model: str, command_name: str) -> tuple[bool, str]:
+    """Validate commands that still have Claude-only runtime paths."""
+    if is_gpt_model(model):
+        return (
+            False,
+            f"Codex/GPT model '{model}' is not supported for {command_name} yet. "
+            "Use a Claude model for this command.",
+        )
+    return _check_selected_model(model)
 
 
 def ensure_skills_installed(
@@ -171,6 +183,11 @@ def cmd_plan(args) -> int:
     import sys
 
     plan_file = args.plan_file if hasattr(args, "plan_file") and args.plan_file else None
+    model = _selected_model_from_args(args)
+    ok, error = _check_selected_claude_model(model, "dvx plan")
+    if not ok:
+        print(f"Error: {error}")
+        return 1
 
     # Get input: piped or editor
     if not sys.stdin.isatty():
@@ -183,12 +200,6 @@ def cmd_plan(args) -> int:
 
     if not user_input:
         print("Error: No input provided.")
-        return 1
-
-    model = _selected_model_from_args(args)
-    ok, error = _check_selected_model(model)
-    if not ok:
-        print(f"Error: {error}")
         return 1
 
     print("Generating plan with Claude...")
@@ -379,6 +390,12 @@ def cmd_autopilot(args) -> int:
         print("Error: provide a task string or --resume <slug>.")
         return 1
 
+    model = _selected_model_from_args(args)
+    ok, error = _check_selected_claude_model(model, "dvx autopilot")
+    if not ok:
+        print(f"Error: {error}")
+        return 1
+
     plan = build_plan_from_args(
         task=task,
         skip_interview=getattr(args, "skip_interview", False),
@@ -431,7 +448,7 @@ def cmd_interview(args) -> int:
     slug = args.slug or slug_from(task)
     project_dir: Optional[str] = None
     model = _selected_model_from_args(args)
-    ok, error = _check_selected_model(model)
+    ok, error = _check_selected_claude_model(model, "dvx interview")
     if not ok:
         print(f"Error: {error}")
         return 1
@@ -796,6 +813,14 @@ def _cmd_run_with_model(args, model: str) -> int:
 
     # Handle blocked state - launch interactive session to resolve
     if state is not None and state.phase == Phase.BLOCKED.value:
+        if is_gpt_model(model):
+            print(
+                "Error: dvx run cannot resume a saved BLOCKED interactive recovery "
+                f"with Codex/GPT model '{model}' yet."
+            )
+            print("Re-run this blocked plan with a Claude model to resolve interactively.")
+            return 1
+
         print(f"Resuming blocked orchestration: {state.plan_file}")
         print(f"Current task: {state.current_task_id} - {state.current_task_title}")
         print()
@@ -1123,7 +1148,10 @@ def main() -> int:
     run_parser.add_argument("--no-deslop", action="store_true", help="Skip the post-approval deslop cleanup pass")
     run_parser.add_argument(
         "--model",
-        help="Claude model to use (overrides DVX_MODEL; default: claude-opus-4-8)",
+        help=(
+            "Agent model to use (overrides DVX_MODEL; default: claude-opus-4-8). "
+            "gpt-* models use Codex for non-interactive run flow."
+        ),
     )
     run_parser.set_defaults(func=cmd_run)
 
@@ -1160,7 +1188,10 @@ def main() -> int:
     )
     watch_parser.add_argument(
         "--model",
-        help="Claude model to use (overrides DVX_MODEL; default: claude-opus-4-8)",
+        help=(
+            "Agent model to use (overrides DVX_MODEL; default: claude-opus-4-8). "
+            "gpt-* models use Codex for watched work."
+        ),
     )
     watch_parser.set_defaults(func=cmd_watch)
 
@@ -1223,7 +1254,10 @@ def main() -> int:
     )
     autopilot_parser.add_argument(
         "--model",
-        help="Claude model to use for all autopilot phases (overrides DVX_MODEL; default: claude-opus-4-8)",
+        help=(
+            "Claude model to use for all autopilot phases "
+            "(overrides DVX_MODEL; default: claude-opus-4-8)"
+        ),
     )
     autopilot_parser.set_defaults(func=cmd_autopilot)
 
