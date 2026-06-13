@@ -574,7 +574,7 @@ def item_type_for_file(file_name: str) -> str:
 
 
 def scan_goal_files(goals_dir: Path) -> list[str]:
-    """List watched work file names in arrival order (mtime, then name)."""
+    """List watched work file names oldest-first by mtime, then name."""
     if not goals_dir.exists():
         return []
     files = [
@@ -584,6 +584,16 @@ def scan_goal_files(goals_dir: Path) -> list[str]:
     ]
     files.sort(key=lambda p: (p.stat().st_mtime_ns, p.name))
     return [p.name for p in files]
+
+
+def _watch_queue_sort_key(goals_dir: Path, file_name: str) -> tuple[int, int, str]:
+    path = goals_dir / file_name
+    try:
+        return (0, path.stat().st_mtime_ns, file_name)
+    except FileNotFoundError:
+        # Stale queue entries should be claimed and failed before real work so
+        # they cannot sit in saved state indefinitely.
+        return (-1, 0, file_name)
 
 
 def _snapshot_queued_goal(
@@ -755,9 +765,14 @@ def enqueue_new_goals(state: GoalState, project_dir: Optional[str] = None) -> li
         known.add(state.current["goal_file"])
     known.update(f["goal_file"] for f in state.failed if "goal_file" in f)
 
-    added = [name for name in scan_goal_files(Path(state.goals_dir)) if name not in known]
+    goals_dir = Path(state.goals_dir)
+    added = [name for name in scan_goal_files(goals_dir) if name not in known]
+    original_queue = list(state.queue)
     if added:
         state.queue.extend(added)
+    if state.queue:
+        state.queue.sort(key=lambda name: _watch_queue_sort_key(goals_dir, name))
+    if added or state.queue != original_queue:
         save_goal_state(state, project_dir)
     return added
 

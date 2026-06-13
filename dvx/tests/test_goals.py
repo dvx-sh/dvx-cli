@@ -258,6 +258,21 @@ class TestQueueScanning(GitRepoTestCase):
         assert enqueue_new_goals(state) == []
         assert state.queue == ["GOAL-one.md"]
 
+    def test_enqueue_keeps_saved_queue_oldest_first(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        newer = self.add_goal("GOAL-newer.md")
+        import os
+
+        os.utime(newer, (20, 20))
+        state = self.new_state()
+        enqueue_new_goals(state)
+
+        older = self.add_goal("GOAL-older.md")
+        os.utime(older, (10, 10))
+
+        assert enqueue_new_goals(state) == ["GOAL-older.md"]
+        assert state.queue == ["GOAL-older.md", "GOAL-newer.md"]
+
     def test_enqueue_skips_current_goal(self, monkeypatch):
         monkeypatch.chdir(self.temp_dir)
         self.add_goal("GOAL-one.md")
@@ -1279,6 +1294,38 @@ class TestRunGoalWatch(GitRepoTestCase):
         assert [c["goal_file"] for c in state.completed] == ["GOAL-first.md", "GOAL-second.md"]
         assert scan_goal_files(Path("goals")) == []
         assert run_git(["rev-parse", "--abbrev-ref", "HEAD"], self.temp_dir) == "work"
+
+    def test_processes_oldest_file_before_saved_newer_queue_item(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        newer = self.add_goal("GOAL-newer.md", "Newer goal.\n")
+        import os
+
+        os.utime(newer, (20, 20))
+        state = self.new_state()
+        state.queue = ["GOAL-newer.md"]
+        save_goal_state(state)
+
+        older = self.add_goal("GOAL-older.md", "Older goal.\n")
+        os.utime(older, (10, 10))
+
+        order = []
+
+        def implement(content):
+            order.append(content.strip())
+            Path(f"out-{len(order)}.txt").write_text(content)
+
+        rc = run_goal_watch(
+            "work",
+            goals_dir="./goals",
+            once=True,
+            claude_runner=make_runner(side_effect=implement),
+            commit_runner=noop_commit_runner,
+        )
+
+        assert rc == 0
+        assert order == ["Older goal.", "Newer goal."]
+        state = load_goal_state()
+        assert [c["goal_file"] for c in state.completed] == ["GOAL-older.md", "GOAL-newer.md"]
 
     def test_watch_dispatches_goal_files_to_goal_and_other_files_to_run(self, monkeypatch):
         monkeypatch.chdir(self.temp_dir)

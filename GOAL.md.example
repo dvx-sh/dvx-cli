@@ -9,7 +9,8 @@ How to use:
 2. Fill in every section below. Delete this comment block and any section that is
    genuinely empty.
 3. Drop the file into the goals directory while `dvx watch` is running (or start
-   `dvx watch` afterwards). The watcher queues files in arrival order.
+   `dvx watch` afterwards). Outside of MERGE requests, the watcher processes
+   files oldest-first by file modification time, then filename.
 
 What the implementer session is (write the goal for THIS audience):
 - This file is handed to a single headless Claude Code session using the
