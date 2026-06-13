@@ -26,11 +26,15 @@ from goals import (
     STATUS_GOAL_DELETED,
     STATUS_MERGED,
     STATUS_RAN,
+    STOP_FILE_NAME,
+    SYNC_FILE_NAME,
+    SYNC_STATUS_LOCAL_MERGED,
     GoalState,
     _step_create_branch,
     branch_name_for_goal,
     claim_merge_request,
     claim_next_goal,
+    claim_sync_request,
     clear_goal_state,
     current_goal_content_file,
     enqueue_new_goals,
@@ -39,6 +43,7 @@ from goals import (
     load_goal_state,
     process_current_goal,
     process_merge_request,
+    process_sync_request,
     queued_goal_snapshot_file,
     queued_goal_snapshot_manifest_file,
     run_goal_watch,
@@ -186,6 +191,7 @@ class TestGoalStatePersistence:
             goals_dir="./goals",
             queue=["GOAL-b.md"],
             current={"goal_file": "GOAL-a.md", "branch": "goal-a", "status": STATUS_BRANCHED},
+            sync={"sync_file": SYNC_FILE_NAME, "status": SYNC_STATUS_LOCAL_MERGED},
         )
         save_goal_state(state)
 
@@ -194,6 +200,7 @@ class TestGoalStatePersistence:
         assert loaded.watch_branch == "work"
         assert loaded.queue == ["GOAL-b.md"]
         assert loaded.current["status"] == STATUS_BRANCHED
+        assert loaded.sync["status"] == SYNC_STATUS_LOCAL_MERGED
         assert loaded.updated_at is not None
 
     def test_save_leaves_no_temp_file(self, monkeypatch):
@@ -253,12 +260,14 @@ class TestQueueScanning(GitRepoTestCase):
     def test_item_type_for_file(self, file_name, expected):
         assert item_type_for_file(file_name) == expected
 
-    def test_scan_includes_goal_and_run_files_but_not_merge_control(self, monkeypatch):
+    def test_scan_includes_goal_and_run_files_but_not_control_files(self, monkeypatch):
         monkeypatch.chdir(self.temp_dir)
         self.add_goal("GOAL-one.md")
         (Path("goals") / "notes.txt").write_text("run this\n")
         (Path("goals") / "PLAN-x.md").write_text("plan work\n")
         (Path("goals") / MERGE_FILE_NAME).write_text("")
+        (Path("goals") / SYNC_FILE_NAME).write_text("")
+        (Path("goals") / STOP_FILE_NAME).write_text("")
         (Path("goals") / "nested").mkdir()
         import os
 
@@ -1334,6 +1343,136 @@ class TestRunGoalWatch(GitRepoTestCase):
         assert rc == 0
         assert Path("goals").exists()
 
+    def test_stop_file_exits_idle_watch_and_is_consumed(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        stop_file = Path("goals") / STOP_FILE_NAME
+        stop_file.write_text("ignored content\n")
+
+        rc = run_goal_watch(
+            "work",
+            goals_dir="./goals",
+            once=True,
+            claude_runner=fail_goal_runner,
+            commit_runner=fail_commit_runner,
+        )
+
+        assert rc == 0
+        assert not stop_file.exists()
+        state = load_goal_state()
+        assert state.current is None
+        assert state.queue == []
+
+    def test_stop_exits_before_claiming_pending_control_files_when_idle(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        stop_file = Path("goals") / STOP_FILE_NAME
+        merge_file = Path("goals") / MERGE_FILE_NAME
+        sync_file = Path("goals") / SYNC_FILE_NAME
+        stop_file.write_text("")
+        merge_file.write_text("")
+        sync_file.write_text("")
+
+        rc = run_goal_watch(
+            "work",
+            goals_dir="./goals",
+            once=True,
+            claude_runner=fail_goal_runner,
+            commit_runner=fail_commit_runner,
+            merge_runner=fail_merge_runner,
+        )
+
+        assert rc == 0
+        assert not stop_file.exists()
+        assert merge_file.exists()
+        assert sync_file.exists()
+        state = load_goal_state()
+        assert state.merge is None
+        assert state.sync is None
+        assert state.failed == []
+
+    def test_stop_waits_for_current_item_then_exits_before_next_queue_item(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        first = self.add_goal("GOAL-first.md", "First goal.\n")
+        second = self.add_goal("GOAL-second.md", "Second goal.\n")
+        import os
+
+        os.utime(first, (1, 1))
+        os.utime(second, (2, 2))
+
+        seen = []
+
+        def implement(content):
+            seen.append(content.strip())
+            (Path("goals") / STOP_FILE_NAME).write_text("stop after this item\n")
+
+        rc = run_goal_watch(
+            "work",
+            goals_dir="./goals",
+            once=True,
+            claude_runner=make_runner(side_effect=implement),
+            commit_runner=noop_commit_runner,
+        )
+
+        assert rc == 0
+        assert seen == ["First goal."]
+        assert not (Path("goals") / STOP_FILE_NAME).exists()
+        assert not first.exists()
+        assert second.exists()
+        state = load_goal_state()
+        assert state.current is None
+        assert state.queue == ["GOAL-second.md"]
+        assert [c["goal_file"] for c in state.completed] == ["GOAL-first.md"]
+
+    def test_stop_exits_blocked_watch_without_clearing_blocked_state(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        Path("README.md").write_text("# dirty\n")
+        state = self.new_state()
+        state.blocked = {
+            "goal_file": "GOAL-blocked.md",
+            "reason": "working tree is dirty outside the watched directory and .dvx",
+            "dirty_paths": ["README.md"],
+        }
+        save_goal_state(state)
+        stop_file = Path("goals") / STOP_FILE_NAME
+        stop_file.write_text("")
+
+        rc = run_goal_watch(
+            "work",
+            goals_dir="./goals",
+            once=True,
+            claude_runner=fail_goal_runner,
+            commit_runner=fail_commit_runner,
+        )
+
+        assert rc == 0
+        assert not stop_file.exists()
+        recovered = load_goal_state()
+        assert recovered.blocked["goal_file"] == "GOAL-blocked.md"
+        assert recovered.blocked["dirty_paths"] == ["README.md"]
+
+    def test_reserved_control_names_are_removed_from_recovered_queue(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        goal = self.add_goal("GOAL-real.md", "Real work.\n")
+        import os
+
+        os.utime(goal, (1, 1))
+        state = self.new_state()
+        state.queue = [MERGE_FILE_NAME, SYNC_FILE_NAME, STOP_FILE_NAME, "GOAL-real.md"]
+        save_goal_state(state)
+
+        rc = run_goal_watch(
+            "work",
+            goals_dir="./goals",
+            once=True,
+            claude_runner=make_runner(),
+            commit_runner=noop_commit_runner,
+        )
+
+        assert rc == 0
+        recovered = load_goal_state()
+        assert recovered.queue == []
+        assert recovered.failed == []
+        assert [c["goal_file"] for c in recovered.completed] == ["GOAL-real.md"]
+
     def test_continuous_watch_prints_waiting_notice_once_while_polling(
         self,
         monkeypatch,
@@ -2115,7 +2254,7 @@ class TestRunGoalWatch(GitRepoTestCase):
 
 
 class TestMergeRequest(GitRepoTestCase):
-    """MERGE control file: merge the watch branch into a remote target branch."""
+    """MERGE/SYNC control file integration against real git remotes."""
 
     def setup_remote(self, tmp_path) -> Path:
         origin = tmp_path / "origin.git"
@@ -2129,6 +2268,11 @@ class TestMergeRequest(GitRepoTestCase):
         merge_file = Path(self.temp_dir) / "goals" / MERGE_FILE_NAME
         merge_file.write_text(content)
         return merge_file
+
+    def write_sync_file(self, content: str = "") -> Path:
+        sync_file = Path(self.temp_dir) / "goals" / SYNC_FILE_NAME
+        sync_file.write_text(content)
+        return sync_file
 
     def commit_on_work(self, name="work.txt", content="work\n", message="work commit"):
         (Path(self.temp_dir) / name).write_text(content)
@@ -2422,3 +2566,279 @@ class TestMergeRequest(GitRepoTestCase):
 
         assert claimed is None and error == ""
         assert state.blocked is None
+
+    def test_empty_sync_file_merges_default_branch_into_watch_and_pushes_watch(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        monkeypatch.chdir(self.temp_dir)
+        origin = self.setup_remote(tmp_path)
+        self.commit_on_work("local.txt", "local\n", "local work")
+        self.commit_on_origin_branch(
+            origin, tmp_path, "main", "upstream.txt", "upstream\n", "upstream change"
+        )
+        sync_file = self.write_sync_file("")
+
+        rc = run_goal_watch(
+            "work",
+            goals_dir="./goals",
+            once=True,
+            claude_runner=fail_goal_runner,
+            commit_runner=fail_commit_runner,
+            merge_runner=fail_merge_runner,
+        )
+
+        assert rc == 0
+        work_tip = run_git(["rev-parse", "work"], self.temp_dir)
+        assert run_git(["rev-parse", "work"], str(origin)) == work_tip
+        assert run_git(["rev-parse", "main"], str(origin)) != work_tip
+        assert (Path(self.temp_dir) / "local.txt").exists()
+        assert (Path(self.temp_dir) / "upstream.txt").exists()
+        assert not sync_file.exists()
+        state = load_goal_state()
+        assert state.sync is None
+        assert state.completed and state.completed[0]["synced_from"] == "origin/main"
+        assert state.completed[0]["pushed_to"] == "origin/work"
+
+    def test_stop_after_sync_exits_before_next_queue_item(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(self.temp_dir)
+        origin = self.setup_remote(tmp_path)
+        self.commit_on_work("local.txt", "local\n", "local work")
+        self.commit_on_origin_branch(
+            origin, tmp_path, "main", "upstream.txt", "upstream\n", "upstream change"
+        )
+        self.write_sync_file("")
+        state = self.new_state()
+        claimed, error = claim_sync_request(state)
+        assert claimed, error
+        queued = self.add_goal("GOAL-after-sync.md", "Queued after sync.\n")
+        stop_file = Path("goals") / STOP_FILE_NAME
+        stop_file.write_text("")
+
+        rc = run_goal_watch(
+            "work",
+            goals_dir="./goals",
+            once=True,
+            claude_runner=fail_goal_runner,
+            commit_runner=fail_commit_runner,
+            merge_runner=fail_merge_runner,
+        )
+
+        assert rc == 0
+        assert not stop_file.exists()
+        assert queued.exists()
+        assert (Path(self.temp_dir) / "upstream.txt").exists()
+        state = load_goal_state()
+        assert state.sync is None
+        assert state.current is None
+        assert state.queue == ["GOAL-after-sync.md"]
+
+    def test_stop_after_merge_exits_before_next_queue_item(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(self.temp_dir)
+        origin = self.setup_remote(tmp_path)
+        self.commit_on_work()
+        self.write_merge_file("")
+        state = self.new_state()
+        claimed, error = claim_merge_request(state)
+        assert claimed, error
+        queued = self.add_goal("GOAL-after-merge.md", "Queued after merge.\n")
+        stop_file = Path("goals") / STOP_FILE_NAME
+        stop_file.write_text("")
+
+        rc = run_goal_watch(
+            "work",
+            goals_dir="./goals",
+            once=True,
+            claude_runner=fail_goal_runner,
+            commit_runner=fail_commit_runner,
+            merge_runner=fail_merge_runner,
+        )
+
+        assert rc == 0
+        work_tip = run_git(["rev-parse", "work"], self.temp_dir)
+        assert run_git(["rev-parse", "main"], str(origin)) == work_tip
+        assert not stop_file.exists()
+        assert queued.exists()
+        state = load_goal_state()
+        assert state.merge is None
+        assert state.current is None
+        assert state.queue == ["GOAL-after-merge.md"]
+
+    def test_sync_conflicts_resolved_by_merge_runner(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(self.temp_dir)
+        origin = self.setup_remote(tmp_path)
+        self.commit_on_work("README.md", "# work side\n", "work readme")
+        self.commit_on_origin_branch(
+            origin, tmp_path, "main", "README.md", "# upstream side\n", "upstream readme"
+        )
+        self.write_sync_file("main\n")
+        state = self.new_state()
+        claimed, error = claim_sync_request(state)
+        assert claimed, error
+
+        def resolve(target):
+            assert target == "origin/main"
+            Path("README.md").write_text("# synced\n")
+            run_git(["add", "README.md"], self.temp_dir)
+            run_git(["commit", "--no-edit"], self.temp_dir)
+
+        merge_runner = make_runner(side_effect=resolve)
+        ok, error = process_sync_request(state, merge_runner=merge_runner)
+
+        assert ok, error
+        assert len(merge_runner.calls) == 1
+        assert state.sync is None
+        work_tip = run_git(["rev-parse", "work"], self.temp_dir)
+        assert run_git(["rev-parse", "work"], str(origin)) == work_tip
+        assert run_git(["rev-parse", "main"], str(origin)) != work_tip
+        assert (Path(self.temp_dir) / "README.md").read_text() == "# synced\n"
+
+    def test_sync_push_race_refetches_remote_watch_and_retries(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(self.temp_dir)
+        origin = self.setup_remote(tmp_path)
+        self.commit_on_work()
+        run_git(["push", "origin", "work"], self.temp_dir)
+        self.commit_on_origin_branch(
+            origin, tmp_path, "main", "upstream.txt", "upstream\n", "upstream change"
+        )
+        self.write_sync_file("main\n")
+        state = self.new_state()
+        claimed, error = claim_sync_request(state)
+        assert claimed, error
+
+        ok, error = goals_module._step_sync_local(state, fail_merge_runner)
+        assert ok, error
+        state.sync["status"] = SYNC_STATUS_LOCAL_MERGED
+        save_goal_state(state)
+        self.commit_on_origin_branch(
+            origin, tmp_path, "work", "racer.txt", "raced\n", "racer change"
+        )
+
+        ok, error = process_sync_request(state, merge_runner=fail_merge_runner)
+
+        assert ok, error
+        assert state.sync is None
+        work_tip = run_git(["rev-parse", "work"], self.temp_dir)
+        assert run_git(["rev-parse", "work"], str(origin)) == work_tip
+        assert (Path(self.temp_dir) / "upstream.txt").exists()
+        assert (Path(self.temp_dir) / "racer.txt").exists()
+        assert state.completed[-1]["pushed_to"] == "origin/work"
+
+    def test_dirty_tree_blocks_sync_claim_and_keeps_file(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(self.temp_dir)
+        self.setup_remote(tmp_path)
+        (Path(self.temp_dir) / "README.md").write_text("# dirty\n")
+        sync_file = self.write_sync_file("")
+        state = self.new_state()
+
+        claimed, error = claim_sync_request(state)
+
+        assert claimed is None and error == ""
+        assert state.sync is None
+        assert state.blocked and state.blocked["sync_file"] == SYNC_FILE_NAME
+        assert state.blocked["dirty_paths"] == ["README.md"]
+        assert sync_file.exists()
+
+    def test_dirty_merge_block_suppresses_sync_claim_and_preserves_both_files(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        monkeypatch.chdir(self.temp_dir)
+        self.setup_remote(tmp_path)
+        (Path(self.temp_dir) / "README.md").write_text("# dirty\n")
+        merge_file = self.write_merge_file("")
+        sync_file = self.write_sync_file("")
+
+        rc = run_goal_watch(
+            "work",
+            goals_dir="./goals",
+            once=True,
+            claude_runner=fail_goal_runner,
+            commit_runner=fail_commit_runner,
+            merge_runner=fail_merge_runner,
+        )
+
+        assert rc == 1
+        state = load_goal_state()
+        assert state.merge is None
+        assert state.sync is None
+        assert state.blocked["merge_file"] == MERGE_FILE_NAME
+        assert merge_file.exists()
+        assert sync_file.exists()
+
+    def test_dirty_sync_block_suppresses_queue_claim(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(self.temp_dir)
+        self.setup_remote(tmp_path)
+        (Path(self.temp_dir) / "README.md").write_text("# dirty\n")
+        queued = self.add_goal("GOAL-wait.md", "Queued while sync is blocked.\n")
+        sync_file = self.write_sync_file("")
+
+        rc = run_goal_watch(
+            "work",
+            goals_dir="./goals",
+            once=True,
+            claude_runner=fail_goal_runner,
+            commit_runner=fail_commit_runner,
+            merge_runner=fail_merge_runner,
+        )
+
+        assert rc == 1
+        state = load_goal_state()
+        assert state.current is None
+        assert state.queue == ["GOAL-wait.md"]
+        assert state.blocked["sync_file"] == SYNC_FILE_NAME
+        assert queued.exists()
+        assert sync_file.exists()
+
+    def test_deleting_sync_file_clears_sync_block_before_dirty_path_gating(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        monkeypatch.chdir(self.temp_dir)
+        self.setup_remote(tmp_path)
+        (Path(self.temp_dir) / "README.md").write_text("# dirty\n")
+        sync_file = self.write_sync_file("")
+        state = self.new_state()
+        claim_sync_request(state)
+        assert state.blocked
+
+        sync_file.unlink()
+        rc = run_goal_watch(
+            "work",
+            goals_dir="./goals",
+            once=True,
+            claude_runner=fail_goal_runner,
+            commit_runner=fail_commit_runner,
+            merge_runner=fail_merge_runner,
+        )
+
+        assert rc == 0
+        assert load_goal_state().blocked is None
+
+    def test_empty_sync_default_branch_error_mentions_sync(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        self.write_sync_file("")
+        state = self.new_state()
+
+        def completed(args, returncode=0, stdout="", stderr=""):
+            return subprocess.CompletedProcess(args, returncode, stdout=stdout, stderr=stderr)
+
+        def fake_git(args):
+            if args == ["remote"]:
+                return completed(args, stdout="origin\n")
+            if args == ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"]:
+                return completed(args, returncode=1, stderr="no remote head\n")
+            if args == ["ls-remote", "--symref", "origin", "HEAD"]:
+                return completed(args, stdout="")
+            raise AssertionError(f"unexpected git call: {args}")
+
+        monkeypatch.setattr(goals_module, "_git", fake_git)
+
+        claimed, error = claim_sync_request(state)
+
+        assert claimed is None
+        assert "SYNC file" in error
+        assert "MERGE file" not in error

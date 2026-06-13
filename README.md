@@ -24,7 +24,7 @@ In a separate terminal, in your project directory:
 dvx watch
 ```
 
-It watches `.dvx/todo/` for work files. `GOAL*.md` files keep the Claude `/goal` flow for Claude models and use a Codex exec prompt for GPT models; any other regular file (`PLAN*.md`, `TASK*.md`, `TODO*.md`, `.txt`, etc.) runs through the same loop as `dvx run`. Outside of MERGE requests, files are processed oldest-first by file modification time, then filename. Each file gets its own branch, a headless agent session implements it with the configured model (default: `claude-opus-4-8`), and changes are committed in logical groups and merged back. A killed watcher resumes where it left off (`dvx clear` resets watcher state). The watcher only claims files when the working tree is clean — commit or stash first; blocked files are reported along with the dirty paths. Merges land on the branch the watcher was started on, which is then pushed to its remote (when one exists) — run the watcher on a dedicated branch and review the work there; nothing touches main unless you start the watcher on main.
+It watches `.dvx/todo/` for work files. `GOAL*.md` files keep the Claude `/goal` flow for Claude models and use a Codex exec prompt for GPT models; any other regular file (`PLAN*.md`, `TASK*.md`, `TODO*.md`, `.txt`, etc.) runs through the same loop as `dvx run`. Outside of control files (`MERGE`, `SYNC`, `STOP`), files are processed oldest-first by file modification time, then filename. Each file gets its own branch, a headless agent session implements it with the configured model (default: `claude-opus-4-8`), and changes are committed in logical groups and merged back. A killed watcher resumes where it left off (`dvx clear` resets watcher state). The watcher only claims files when the working tree is clean — commit or stash first; blocked files are reported along with the dirty paths. Merges land on the branch the watcher was started on, which is then pushed to its remote (when one exists) — run the watcher on a dedicated branch and review the work there; nothing touches main unless you start the watcher on main.
 
 
 ### Agent model selection
@@ -66,6 +66,21 @@ echo dev > .dvx/todo/MERGE       # merge into origin/dev
 ```
 
 The merge runs between queued files — after the in-flight item finishes (if any) and before the next queued one; it takes precedence over the queue. The watcher fetches, merges the remote target into the watch branch (the selected agent resolves any conflicts), fast-forwards the remote target to the watch branch tip — never force-pushed, so if the target advances mid-merge the watcher re-fetches and re-merges instead of clobbering it — then pushes the watch branch. The MERGE file is consumed when claimed. Like queued files, the merge only starts on a clean working tree, and it requires a git remote with the target branch already on it.
+
+## Sync the watch branch
+
+Drop a file named `SYNC` in `.dvx/todo/` to ask the watcher to merge a remote branch into the watch branch and push the watch branch. An empty file syncs from the remote's default branch; otherwise the file contains a single branch name and nothing else.
+
+```bash
+touch .dvx/todo/SYNC            # sync from the default branch
+echo dev > .dvx/todo/SYNC       # sync from origin/dev
+```
+
+SYNC runs between queued files, after any MERGE request and before normal queued work. If pushing the watch branch is rejected because `origin/<watch-branch>` advanced, the watcher fetches and merges that remote watch branch, re-fetches and re-merges the sync source, then retries the push without force-pushing. A dirty tree blocks SYNC and leaves the SYNC file in place; deleting that file clears the control block on the next watch pass.
+
+## Stop the watcher cleanly
+
+Drop a file named `STOP` in `.dvx/todo/` to ask the watcher to exit with status 0 after the active item, MERGE, or SYNC finishes. STOP is content-agnostic and stateless: the file is consumed when noticed. If the watcher is idle or blocked, STOP exits immediately without clearing preserved watch state.
 
 ## Requirements
 

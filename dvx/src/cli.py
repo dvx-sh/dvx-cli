@@ -987,7 +987,10 @@ def cmd_watch(args) -> int:
 
     Dropping a MERGE file in the watched directory merges the watch branch
     into the remote's default branch (empty file) or the branch named in
-    the file. The merge runs between watched items, ahead of the queue.
+    the file. A SYNC file does the opposite: it merges that remote branch
+    into the watch branch, then pushes the watch branch. A STOP file asks
+    the watcher to exit cleanly after current work/control processing.
+    Control files run between watched items, ahead of the queue.
     """
     ok, branch_or_error = check_watch_git_environment()
     if not ok:
@@ -1160,7 +1163,7 @@ def main() -> int:
         "watch",
         help=(
             "Watch a work directory and process GOAL*.md via /goal, other files via dvx run "
-            "(a MERGE file there merges the watch branch into a remote branch)"
+            "(MERGE/SYNC/STOP files control branch integration and clean exit)"
         ),
     )
     watch_parser.add_argument(

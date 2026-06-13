@@ -20,15 +20,14 @@ there. Watcher state lives separately in
 point and `dvx watch` will recover and continue from the last completed
 step.
 
-The watched directory also accepts one control file: MERGE. Dropping it asks
-the watcher to merge the watch branch into a remote branch - empty file
-means the remote's default branch; otherwise the file holds a single branch
-name (e.g. "dev"). The merge runs between items: after the in-flight item
-finishes (if any) and before the next queued item starts. The remote target
-is brought into the watch branch first (the selected agent resolves conflicts), then
-the target is fast-forwarded to the watch branch tip - never force-pushed -
-so if another process advances the target mid-merge, the push is rejected
-and the watcher re-fetches and re-merges instead of clobbering it.
+The watched directory also accepts control files. MERGE asks the watcher to
+merge the watch branch into a remote branch. SYNC asks the watcher to merge a
+remote branch into the watch branch and push the watch branch. Empty MERGE or
+SYNC files use the remote's default branch; otherwise the file holds a single
+branch name (e.g. "dev"). STOP asks the watcher to exit cleanly after current
+work finishes. Control files are one-shot signals deleted when consumed, except
+dirty-tree blocks leave MERGE/SYNC files in place for retry. Control work runs
+between items, ahead of queued files, and remote pushes are never forced.
 """
 
 import hashlib
@@ -83,9 +82,23 @@ DEFAULT_POLL_INTERVAL = 2.0
 # branch into a remote branch. Empty file = the remote's default branch;
 # otherwise the file contains a single branch name (e.g. "dev").
 MERGE_FILE_NAME = "MERGE"
+# Control file requesting that a remote branch be merged into the watch branch.
+SYNC_FILE_NAME = "SYNC"
+# Control file requesting a clean watcher exit after current work completes.
+STOP_FILE_NAME = "STOP"
+CONTROL_FILE_NAMES = {MERGE_FILE_NAME, SYNC_FILE_NAME, STOP_FILE_NAME}
+# Explicit precedence for claimable control work. STOP is not claimable state;
+# it is a stateless exit signal checked before new claims and after active work.
+CONTROL_CLAIM_PRECEDENCE = (MERGE_FILE_NAME, SYNC_FILE_NAME)
+CONTROL_BLOCK_KEYS = {
+    MERGE_FILE_NAME: "merge_file",
+    SYNC_FILE_NAME: "sync_file",
+}
 # How many times the remote target may advance mid-merge (rejecting our
 # fast-forward push) before the watcher gives up and asks to be re-run.
 MERGE_PUSH_MAX_ATTEMPTS = 3
+# Same retry limit for pushes of the watch branch during SYNC.
+SYNC_PUSH_MAX_ATTEMPTS = 3
 
 # Step statuses for the current goal. Each status names the step that has
 # COMPLETED; recovery re-enters the state machine at the next step. Every
@@ -105,6 +118,11 @@ MERGE_STATUS_CLAIMED = "claimed"            # MERGE file consumed, target record
 MERGE_STATUS_LOCAL_MERGED = "local_merged"  # remote target merged into watch branch
 MERGE_STATUS_TARGET_PUSHED = "target_pushed"  # remote target fast-forwarded to watch tip
 
+# Step statuses for a pending sync request (SYNC control file).
+SYNC_STATUS_CLAIMED = "claimed"            # SYNC file consumed, target recorded
+SYNC_STATUS_LOCAL_MERGED = "local_merged"  # remote branch merged into watch branch
+SYNC_STATUS_WATCH_PUSHED = "watch_pushed"  # watch branch pushed to remote
+
 
 @dataclass
 class GoalState:
@@ -114,6 +132,7 @@ class GoalState:
     queue: list[str] = field(default_factory=list)
     current: Optional[dict] = None
     merge: Optional[dict] = None
+    sync: Optional[dict] = None
     blocked: Optional[dict] = None
     completed: list[dict] = field(default_factory=list)
     failed: list[dict] = field(default_factory=list)
@@ -289,7 +308,10 @@ def _remote_name() -> tuple[Optional[str], str]:
     return ("origin" if "origin" in remotes else remotes[0]), ""
 
 
-def _default_remote_branch(remote: str) -> tuple[Optional[str], str]:
+def _default_remote_branch(
+    remote: str,
+    control_file_name: str = MERGE_FILE_NAME,
+) -> tuple[Optional[str], str]:
     """Resolve the remote's default branch (its HEAD), e.g. main."""
     result = _git(["symbolic-ref", "--quiet", f"refs/remotes/{remote}/HEAD"])
     if result.returncode == 0:
@@ -307,7 +329,7 @@ def _default_remote_branch(remote: str) -> tuple[Optional[str], str]:
     return None, (
         f"Cannot determine the default branch of remote {remote}; "
         f"run `git remote set-head {remote} --auto` or name the target branch "
-        f"in the {MERGE_FILE_NAME} file"
+        f"in the {control_file_name} file"
     )
 
 
@@ -620,7 +642,7 @@ def scan_goal_files(goals_dir: Path) -> list[str]:
     files = [
         p
         for p in goals_dir.glob(WATCH_FILE_GLOB)
-        if p.is_file() and p.name != MERGE_FILE_NAME
+        if p.is_file() and p.name not in CONTROL_FILE_NAMES
     ]
     files.sort(key=lambda p: (p.stat().st_mtime_ns, p.name))
     return [p.name for p in files]
@@ -684,8 +706,8 @@ def _queued_goal_snapshot_entries(project_dir: Optional[str] = None) -> tuple[li
 
 
 def _guard_holder(state: GoalState) -> Optional[dict]:
-    """The active operation (current goal or pending merge) that owns the guard."""
-    return state.current or state.merge
+    """The active operation (current goal or pending control request) that owns the guard."""
+    return state.current or state.merge or state.sync
 
 
 def _queued_goal_guard_failure(
@@ -815,6 +837,21 @@ def enqueue_new_goals(state: GoalState, project_dir: Optional[str] = None) -> li
     if added or state.queue != original_queue:
         save_goal_state(state, project_dir)
     return added
+
+
+def remove_control_files_from_queue(
+    state: GoalState,
+    project_dir: Optional[str] = None,
+) -> list[str]:
+    """Drop reserved control filenames that were persisted in older queue state."""
+    removed = [name for name in state.queue if name in CONTROL_FILE_NAMES]
+    if not removed:
+        return []
+    state.queue = [name for name in state.queue if name not in CONTROL_FILE_NAMES]
+    for name in removed:
+        _delete_queued_goal_snapshot(name, project_dir)
+    save_goal_state(state, project_dir)
+    return removed
 
 
 def claim_next_goal(state: GoalState, project_dir: Optional[str] = None) -> Optional[dict]:
@@ -1351,6 +1388,37 @@ def merge_request_file(state: GoalState) -> Path:
     return Path(state.goals_dir) / MERGE_FILE_NAME
 
 
+def sync_request_file(state: GoalState) -> Path:
+    return Path(state.goals_dir) / SYNC_FILE_NAME
+
+
+def stop_request_file(state: GoalState) -> Path:
+    return Path(state.goals_dir) / STOP_FILE_NAME
+
+
+def check_stop_request(state: GoalState) -> bool:
+    """Consume a STOP control file if present."""
+    stop_file = stop_request_file(state)
+    if not stop_file.is_file():
+        return False
+    stop_file.unlink(missing_ok=True)
+    return True
+
+
+def _set_control_dirty_block(
+    state: GoalState,
+    control_file_name: str,
+    dirty_paths: list[str],
+) -> None:
+    state.blocked = {
+        "control_file": control_file_name,
+        CONTROL_BLOCK_KEYS[control_file_name]: control_file_name,
+        "reason": "working tree is dirty outside the watched directory and .dvx",
+        "dirty_paths": dirty_paths,
+        "at": datetime.now().isoformat(),
+    }
+
+
 def claim_merge_request(
     state: GoalState,
     project_dir: Optional[str] = None,
@@ -1425,12 +1493,7 @@ def claim_merge_request(
     except RuntimeError as e:
         return None, str(e)
     if dirty:
-        state.blocked = {
-            "merge_file": MERGE_FILE_NAME,
-            "reason": "working tree is dirty outside the watched directory and .dvx",
-            "dirty_paths": dirty,
-            "at": datetime.now().isoformat(),
-        }
+        _set_control_dirty_block(state, MERGE_FILE_NAME, dirty)
         save_goal_state(state, project_dir)
         logger.warning(
             "Blocking merge request: working tree is dirty outside the watched directory "
@@ -1454,6 +1517,87 @@ def claim_merge_request(
     return state.merge, ""
 
 
+def _remote_branch_exists(remote: str, branch: str) -> tuple[bool, str]:
+    result = _git(["ls-remote", "--heads", remote, branch])
+    if result.returncode != 0:
+        return False, _git_error(result, f"look up {branch} on {remote}")
+    return bool(result.stdout.strip()), ""
+
+
+def _fetch_remote_branch(remote: str, branch: str) -> tuple[Optional[str], str]:
+    result = _git(["fetch", remote, branch])
+    if result.returncode != 0:
+        return None, _git_error(result, f"fetch {branch} from {remote}")
+    result = _git(["rev-parse", "--verify", f"refs/remotes/{remote}/{branch}^{{commit}}"])
+    if result.returncode != 0:
+        return None, f"Remote branch missing after fetch: {remote}/{branch}"
+    return result.stdout.strip(), ""
+
+
+def _push_rejected_because_remote_moved(result: subprocess.CompletedProcess) -> bool:
+    detail = (result.stderr or "") + (result.stdout or "")
+    return (
+        "non-fast-forward" in detail
+        or "fetch first" in detail
+        or "[rejected]" in detail
+    )
+
+
+def _merge_commit_into_watch(
+    state: GoalState,
+    merge_runner: Callable[[str], SessionResult],
+    ref_label: str,
+    commit_oid: str,
+    message: str,
+    project_dir: Optional[str] = None,
+) -> tuple[bool, str]:
+    if _is_ancestor(commit_oid, state.watch_branch):
+        return True, ""
+
+    result = _git(["merge", "-m", message, commit_oid])
+    if result.returncode == 0:
+        return True, ""
+    if not _merge_in_progress():
+        return False, _git_error(result, f"merge {ref_label} into {state.watch_branch}")
+
+    ok, error = _begin_queued_goal_guard(state, project_dir)
+    if not ok:
+        _git(["merge", "--abort"])
+        return False, error
+    guard_ok = True
+    guard_error = ""
+    try:
+        session = merge_runner(ref_label)
+    finally:
+        guard_ok, guard_error = _finish_queued_goal_guard(state, project_dir)
+    if not guard_ok:
+        _git(["merge", "--abort"])
+        return False, guard_error
+    if not session.success:
+        _git(["merge", "--abort"])
+        return False, (
+            f"Conflict resolution failed: {session.block_reason or 'session did not succeed'}"
+        )
+    if _merge_in_progress() or _git(["ls-files", "-u"]).stdout.strip():
+        _git(["merge", "--abort"])
+        return False, f"Merge conflicts with {ref_label} were not fully resolved"
+
+    head_branch = _git(["rev-parse", "--abbrev-ref", "HEAD"]).stdout.strip()
+    if head_branch != state.watch_branch:
+        return False, (
+            f"Conflict resolution left HEAD on {head_branch}, expected {state.watch_branch}"
+        )
+    if not _is_ancestor(commit_oid, state.watch_branch):
+        return False, f"Conflict resolution did not complete the merge of {ref_label}"
+    try:
+        remaining = _dirty_paths(state.goals_dir)
+    except RuntimeError as e:
+        return False, str(e)
+    if remaining:
+        return False, f"Working tree still dirty after conflict resolution: {remaining}"
+    return True, ""
+
+
 def _step_merge_local(
     state: GoalState,
     merge_runner: Callable[[str], SessionResult],
@@ -1472,63 +1616,21 @@ def _step_merge_local(
     if not ok:
         return False, error
 
-    result = _git(["fetch", remote, target])
-    if result.returncode != 0:
-        return False, _git_error(result, f"fetch {target} from {remote}")
-
-    result = _git(["rev-parse", "--verify", f"refs/remotes/{remote}/{target}^{{commit}}"])
-    if result.returncode != 0:
-        return False, f"Remote branch missing after fetch: {remote}/{target}"
-    target_oid = result.stdout.strip()
+    target_oid, error = _fetch_remote_branch(remote, target)
+    if target_oid is None:
+        return False, error
     merge["target_oid"] = target_oid
     save_goal_state(state, project_dir)
 
-    if _is_ancestor(target_oid, state.watch_branch):
-        return True, ""
-
     message = f"Merge {remote}/{target} into {state.watch_branch} (dvx merge request)"
-    result = _git(["merge", "-m", message, target_oid])
-    if result.returncode == 0:
-        return True, ""
-    if not _merge_in_progress():
-        return False, _git_error(result, f"merge {remote}/{target} into {state.watch_branch}")
-
-    ok, error = _begin_queued_goal_guard(state, project_dir)
-    if not ok:
-        _git(["merge", "--abort"])
-        return False, error
-    guard_ok = True
-    guard_error = ""
-    try:
-        session = merge_runner(f"{remote}/{target}")
-    finally:
-        guard_ok, guard_error = _finish_queued_goal_guard(state, project_dir)
-    if not guard_ok:
-        _git(["merge", "--abort"])
-        return False, guard_error
-    if not session.success:
-        _git(["merge", "--abort"])
-        return False, (
-            f"Conflict resolution failed: {session.block_reason or 'session did not succeed'}"
-        )
-    if _merge_in_progress() or _git(["ls-files", "-u"]).stdout.strip():
-        _git(["merge", "--abort"])
-        return False, f"Merge conflicts with {remote}/{target} were not fully resolved"
-
-    head_branch = _git(["rev-parse", "--abbrev-ref", "HEAD"]).stdout.strip()
-    if head_branch != state.watch_branch:
-        return False, (
-            f"Conflict resolution left HEAD on {head_branch}, expected {state.watch_branch}"
-        )
-    if not _is_ancestor(target_oid, state.watch_branch):
-        return False, f"Conflict resolution did not complete the merge of {remote}/{target}"
-    try:
-        remaining = _dirty_paths(state.goals_dir)
-    except RuntimeError as e:
-        return False, str(e)
-    if remaining:
-        return False, f"Working tree still dirty after conflict resolution: {remaining}"
-    return True, ""
+    return _merge_commit_into_watch(
+        state,
+        merge_runner,
+        f"{remote}/{target}",
+        target_oid,
+        message,
+        project_dir,
+    )
 
 
 def _step_push_target(state: GoalState) -> tuple[bool, str, bool]:
@@ -1544,14 +1646,8 @@ def _step_push_target(state: GoalState) -> tuple[bool, str, bool]:
     result = _git(["push", remote, f"{state.watch_branch}:refs/heads/{target}"])
     if result.returncode == 0:
         return True, "", False
-    detail = (result.stderr or "") + (result.stdout or "")
-    remote_moved = (
-        "non-fast-forward" in detail
-        or "fetch first" in detail
-        or "[rejected]" in detail
-    )
     error = _git_error(result, f"push {state.watch_branch} to {remote}/{target}")
-    return False, error, remote_moved
+    return False, error, _push_rejected_because_remote_moved(result)
 
 
 def process_merge_request(
@@ -1623,6 +1719,241 @@ def process_merge_request(
     return True, ""
 
 
+# ---------------------------------------------------------------------------
+# Sync requests (SYNC control file)
+# ---------------------------------------------------------------------------
+
+def claim_sync_request(
+    state: GoalState,
+    project_dir: Optional[str] = None,
+) -> tuple[Optional[dict], str]:
+    """
+    Claim a SYNC control file as the pending sync request.
+
+    Empty file = remote default branch; otherwise the file must contain a
+    single remote branch name. Dirty trees block the claim and leave SYNC in
+    place for retry. Invalid requests are consumed and recorded in state.failed.
+    """
+    if state.sync:
+        return state.sync, ""
+
+    sync_file = sync_request_file(state)
+    if not sync_file.exists():
+        if state.blocked and state.blocked.get("sync_file"):
+            state.blocked = None
+            save_goal_state(state, project_dir)
+        return None, ""
+
+    def reject(reason: str) -> tuple[None, str]:
+        sync_file.unlink(missing_ok=True)
+        state.blocked = None
+        state.failed.append({
+            "sync_file": SYNC_FILE_NAME,
+            "reason": reason,
+            "at": datetime.now().isoformat(),
+        })
+        save_goal_state(state, project_dir)
+        logger.warning(f"Rejecting sync request: {reason}")
+        return None, ""
+
+    remote, error = _remote_name()
+    if error:
+        return None, error
+    if remote is None:
+        return reject("sync request requires a git remote")
+
+    text = sync_file.read_text().strip()
+    if text:
+        if len(text.split()) != 1:
+            return reject(
+                f"{SYNC_FILE_NAME} file must be empty (default branch) or "
+                "contain a single branch name"
+            )
+        target = text
+        if _git(["check-ref-format", "--branch", target]).returncode != 0:
+            return reject(f"invalid target branch name: {target}")
+    else:
+        target, error = _default_remote_branch(remote, SYNC_FILE_NAME)
+        if target is None:
+            return None, error
+
+    if target == state.watch_branch:
+        return reject(f"target branch equals the watch branch: {target}")
+
+    result = _git(["ls-remote", "--heads", remote, target])
+    if result.returncode != 0:
+        return None, _git_error(result, f"look up {target} on {remote}")
+    if not result.stdout.strip():
+        return reject(f"branch not found on {remote}: {target}")
+
+    try:
+        dirty = _dirty_paths(state.goals_dir)
+    except RuntimeError as e:
+        return None, str(e)
+    if dirty:
+        _set_control_dirty_block(state, SYNC_FILE_NAME, dirty)
+        save_goal_state(state, project_dir)
+        logger.warning(
+            "Blocking sync request: working tree is dirty outside the watched directory "
+            f"and .dvx: {dirty}"
+        )
+        return None, ""
+
+    state.sync = {
+        "sync_file": SYNC_FILE_NAME,
+        "remote": remote,
+        "target": target,
+        "status": SYNC_STATUS_CLAIMED,
+        "push_attempts": 0,
+        "requested_at": datetime.now().isoformat(),
+    }
+    state.blocked = None
+    save_goal_state(state, project_dir)
+    sync_file.unlink(missing_ok=True)
+    return state.sync, ""
+
+
+def _step_sync_local(
+    state: GoalState,
+    merge_runner: Callable[[str], SessionResult],
+    project_dir: Optional[str] = None,
+) -> tuple[bool, str]:
+    """Bring remote watch/target branches into the local watch branch."""
+    sync = state.sync
+    remote, target = sync["remote"], sync["target"]
+
+    if _merge_in_progress():
+        _git(["merge", "--abort"])
+    ok, error = checkout(state.watch_branch)
+    if not ok:
+        return False, error
+
+    remote_watch_exists, error = _remote_branch_exists(remote, state.watch_branch)
+    if error:
+        return False, error
+    if remote_watch_exists:
+        watch_oid, error = _fetch_remote_branch(remote, state.watch_branch)
+        if watch_oid is None:
+            return False, error
+        sync["remote_watch_oid"] = watch_oid
+        save_goal_state(state, project_dir)
+        ok, error = _merge_commit_into_watch(
+            state,
+            merge_runner,
+            f"{remote}/{state.watch_branch}",
+            watch_oid,
+            f"Merge {remote}/{state.watch_branch} into {state.watch_branch} (dvx sync request)",
+            project_dir,
+        )
+        if not ok:
+            return False, error
+
+    target_oid, error = _fetch_remote_branch(remote, target)
+    if target_oid is None:
+        return False, error
+    sync["target_oid"] = target_oid
+    save_goal_state(state, project_dir)
+    return _merge_commit_into_watch(
+        state,
+        merge_runner,
+        f"{remote}/{target}",
+        target_oid,
+        f"Merge {remote}/{target} into {state.watch_branch} (dvx sync request)",
+        project_dir,
+    )
+
+
+def _step_push_synced_watch_branch(state: GoalState) -> tuple[bool, str, bool]:
+    """Push the watch branch after a sync. Returns (ok, error, remote_moved)."""
+    sync = state.sync
+    remote = sync["remote"]
+    result = _git(["push", remote, state.watch_branch])
+    if result.returncode == 0:
+        return True, "", False
+    error = _git_error(result, f"push {state.watch_branch} to {remote}/{state.watch_branch}")
+    return False, error, _push_rejected_because_remote_moved(result)
+
+
+def process_sync_request(
+    state: GoalState,
+    merge_runner: Optional[Callable[[str], SessionResult]] = None,
+    project_dir: Optional[str] = None,
+    model: Optional[str] = None,
+) -> tuple[bool, str]:
+    """Drive the pending sync request through its remaining steps."""
+    if merge_runner is None:
+        def merge_runner(target):
+            return resolve_merge_conflicts_with_claude(target, state.goals_dir, model=model)
+
+    while state.sync:
+        status = state.sync["status"]
+        remote, target = state.sync["remote"], state.sync["target"]
+        logger.info(f"[sync:{remote}/{target}] step after '{status}'")
+
+        if status == SYNC_STATUS_CLAIMED:
+            ok, error = _step_sync_local(state, merge_runner, project_dir)
+            if not ok:
+                return False, error
+            state.sync["status"] = SYNC_STATUS_LOCAL_MERGED
+            save_goal_state(state, project_dir)
+        elif status == SYNC_STATUS_LOCAL_MERGED:
+            ok, error, remote_moved = _step_push_synced_watch_branch(state)
+            if ok:
+                state.sync["status"] = SYNC_STATUS_WATCH_PUSHED
+                save_goal_state(state, project_dir)
+                continue
+            if not remote_moved:
+                return False, error
+            attempts = state.sync.get("push_attempts", 0) + 1
+            state.sync["push_attempts"] = attempts
+            state.sync["status"] = SYNC_STATUS_CLAIMED
+            save_goal_state(state, project_dir)
+            if attempts >= SYNC_PUSH_MAX_ATTEMPTS:
+                state.sync["push_attempts"] = 0
+                save_goal_state(state, project_dir)
+                return False, (
+                    f"{error} ({remote}/{state.watch_branch} kept advancing during the sync; "
+                    "re-run `dvx watch` to try again)"
+                )
+            logger.info(
+                f"{remote}/{state.watch_branch} advanced during the sync; "
+                "re-fetching and merging again"
+            )
+        elif status == SYNC_STATUS_WATCH_PUSHED:
+            state.completed.append({
+                "sync_file": state.sync.get("sync_file", SYNC_FILE_NAME),
+                "synced_from": f"{remote}/{target}",
+                "pushed_to": f"{remote}/{state.watch_branch}",
+                "finished_at": datetime.now().isoformat(),
+            })
+            state.sync = None
+            save_goal_state(state, project_dir)
+        else:
+            return False, f"Unknown sync status: {status}"
+
+    return True, ""
+
+
+def _blocked_control_file(state: GoalState) -> Optional[str]:
+    if not state.blocked:
+        return None
+    control_file = state.blocked.get("control_file")
+    if control_file in CONTROL_BLOCK_KEYS:
+        return control_file
+    if state.blocked.get(CONTROL_BLOCK_KEYS[MERGE_FILE_NAME]):
+        return MERGE_FILE_NAME
+    if state.blocked.get(CONTROL_BLOCK_KEYS[SYNC_FILE_NAME]):
+        return SYNC_FILE_NAME
+    return None
+
+
+def _blocked_control_file_missing(state: GoalState) -> bool:
+    blocked_file = _blocked_control_file(state)
+    if blocked_file is None:
+        return False
+    return not (Path(state.goals_dir) / blocked_file).exists()
+
+
 def _blocked_dirty_paths_changed(state: GoalState) -> tuple[bool, str]:
     if not state.blocked:
         return True, ""
@@ -1645,7 +1976,7 @@ def _has_resumable_work(state: GoalState) -> bool:
     nothing worth recovering, and its saved watch branch goes stale as soon
     as the user switches branches.
     """
-    return bool(state.current or state.merge or state.blocked or state.queue)
+    return bool(state.current or state.merge or state.sync or state.blocked or state.queue)
 
 
 def run_goal_watch(
@@ -1664,13 +1995,13 @@ def run_goal_watch(
     Watch the work directory and process queued files until interrupted.
 
     Saved state is recovered only when it has resumable work (an in-flight,
-    blocked, or queued goal, or a pending merge request) — an idle state file
+    blocked, or queued goal, or a pending merge/sync request) — an idle state file
     from a previous run is discarded so each watch starts from the branch it
     was launched on. An in-flight item resumes at the step after the last one
-    recorded, then the queue continues. A MERGE control file in the watched
-    directory is claimed between items and processed before the next queued
-    item. With once=True, returns as soon as there is no pending work (used by
-    tests).
+    recorded, then the queue continues. MERGE and SYNC control files in the
+    watched directory are claimed between items and processed before the next
+    queued item. STOP is consumed between items and exits cleanly. With
+    once=True, returns as soon as there is no pending work (used by tests).
     """
     Path(goals_dir).mkdir(parents=True, exist_ok=True)
 
@@ -1704,6 +2035,11 @@ def run_goal_watch(
                 f"Resuming merge into {state.merge['remote']}/{state.merge['target']} "
                 f"after step '{state.merge['status']}'"
             )
+        if state.sync:
+            print(
+                f"Resuming sync from {state.sync['remote']}/{state.sync['target']} "
+                f"after step '{state.sync['status']}'"
+            )
         if state.goals_dir != goals_dir:
             print(f"Using watched directory from saved state: {state.goals_dir}")
 
@@ -1716,8 +2052,22 @@ def run_goal_watch(
         for name in added:
             print(f"Queued {item_type_for_file(name)} item: {name}")
 
+        no_active_control = state.current is None and state.merge is None and state.sync is None
+        if no_active_control:
+            for name in remove_control_files_from_queue(state, project_dir):
+                print(f"Ignoring reserved control file from saved queue: {name}")
+
+        if no_active_control and _blocked_control_file_missing(state):
+            state.blocked = None
+            save_goal_state(state, project_dir)
+
+        if no_active_control and check_stop_request(state):
+            print("Stop requested - exiting after current work.")
+            save_goal_state(state, project_dir)
+            return 0
+
         should_claim = True
-        if state.current is None and state.merge is None and state.blocked:
+        if no_active_control and state.blocked:
             should_claim, error = _blocked_dirty_paths_changed(state)
             if error:
                 print(f"Error: {error}")
@@ -1725,7 +2075,7 @@ def run_goal_watch(
 
         # A MERGE request runs between work items and takes precedence over the
         # queue: claim it before claiming the next item.
-        if state.current is None and state.merge is None and should_claim:
+        if state.current is None and state.merge is None and state.sync is None and should_claim:
             claimed_merge, error = claim_merge_request(state, project_dir)
             if error:
                 print(f"Error: {error}")
@@ -1740,6 +2090,28 @@ def run_goal_watch(
                 print(f"Blocked merge request: {state.blocked['reason']}")
                 print(f"Dirty paths: {state.blocked['dirty_paths']}")
 
+        merge_blocked = _blocked_control_file(state) == CONTROL_CLAIM_PRECEDENCE[0]
+        if (
+            state.current is None
+            and state.merge is None
+            and state.sync is None
+            and should_claim
+            and not merge_blocked
+        ):
+            claimed_sync, error = claim_sync_request(state, project_dir)
+            if error:
+                print(f"Error: {error}")
+                return 1
+            if claimed_sync:
+                watching_notice_printed = False
+                print(
+                    f"Sync requested: {claimed_sync['remote']}/{claimed_sync['target']} -> "
+                    f"{state.watch_branch}"
+                )
+            elif state.blocked and state.blocked.get("sync_file"):
+                print(f"Blocked sync request: {state.blocked['reason']}")
+                print(f"Dirty paths: {state.blocked['dirty_paths']}")
+
         if state.current is None and state.merge:
             merged_into = f"{state.merge['remote']}/{state.merge['target']}"
             ok, error = process_merge_request(
@@ -1751,10 +2123,37 @@ def run_goal_watch(
                 return 1
             print(f"Merged {state.watch_branch} into {merged_into} and pushed.")
             watching_notice_printed = False
+            if check_stop_request(state):
+                print("Stop requested - exiting after current work.")
+                save_goal_state(state, project_dir)
+                return 0
             continue
 
-        merge_blocked = bool(state.blocked and state.blocked.get("merge_file"))
-        if state.current is None and should_claim and not merge_blocked:
+        if state.current is None and state.sync:
+            synced_from = f"{state.sync['remote']}/{state.sync['target']}"
+            ok, error = process_sync_request(
+                state, merge_runner=merge_runner, project_dir=project_dir, model=model
+            )
+            if not ok:
+                print(f"Error: {error}")
+                print("State preserved - re-run `dvx watch` to retry from the failed step.")
+                return 1
+            print(f"Synced {synced_from} into {state.watch_branch} and pushed.")
+            watching_notice_printed = False
+            if check_stop_request(state):
+                print("Stop requested - exiting after current work.")
+                save_goal_state(state, project_dir)
+                return 0
+            continue
+
+        control_blocked = bool(_blocked_control_file(state))
+        if (
+            state.current is None
+            and state.merge is None
+            and state.sync is None
+            and should_claim
+            and not control_blocked
+        ):
             claimed = claim_next_goal(state, project_dir)
             if claimed:
                 watching_notice_printed = False
@@ -1781,6 +2180,10 @@ def run_goal_watch(
                 return 1
             print(f"Item complete and merged into {state.watch_branch}.")
             watching_notice_printed = False
+            if check_stop_request(state):
+                print("Stop requested - exiting after current work.")
+                save_goal_state(state, project_dir)
+                return 0
             continue
 
         if state.blocked:
