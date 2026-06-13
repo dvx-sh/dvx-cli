@@ -3,7 +3,7 @@ Autopilot pipeline for dvx.
 
 A thin orchestrator that sequences:
 
-    interview → consensus plan → run (with architect gate + deslop)
+    interview → consensus plan → run (with architect gate; deslop opt-in)
 
 Each phase writes its own artifact, so a failure mid-pipeline is resumable
 via `dvx autopilot --resume <slug>` (or the per-phase subcommand).
