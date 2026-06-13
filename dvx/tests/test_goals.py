@@ -1272,6 +1272,58 @@ class TestRunGoalWatch(GitRepoTestCase):
         assert rc == 0
         assert Path("goals").exists()
 
+    def test_continuous_watch_prints_waiting_notice_once_while_polling(
+        self,
+        monkeypatch,
+        capsys,
+    ):
+        monkeypatch.chdir(self.temp_dir)
+        sleeps = []
+
+        def stop_after_repeated_polling(interval):
+            sleeps.append(interval)
+            if len(sleeps) == 3:
+                raise RuntimeError("stop watch loop")
+
+        monkeypatch.setattr(goals_module.time, "sleep", stop_after_repeated_polling)
+
+        with pytest.raises(RuntimeError, match="stop watch loop"):
+            run_goal_watch("work", goals_dir="./goals", poll_interval=0.01, once=False)
+
+        out = capsys.readouterr().out
+        assert out.count("Watching for work files in: ./goals") == 1
+
+    def test_continuous_watch_reprints_waiting_notice_after_work_finishes(
+        self,
+        monkeypatch,
+        capsys,
+    ):
+        monkeypatch.chdir(self.temp_dir)
+        sleeps = []
+
+        def add_work_then_stop(interval):
+            sleeps.append(interval)
+            if len(sleeps) == 1:
+                self.add_goal("GOAL-one.md", "One goal.\n")
+            elif len(sleeps) == 2:
+                raise RuntimeError("stop watch loop")
+
+        monkeypatch.setattr(goals_module.time, "sleep", add_work_then_stop)
+
+        with pytest.raises(RuntimeError, match="stop watch loop"):
+            run_goal_watch(
+                "work",
+                goals_dir="./goals",
+                poll_interval=0.01,
+                once=False,
+                claude_runner=make_runner(),
+                commit_runner=noop_commit_runner,
+            )
+
+        out = capsys.readouterr().out
+        assert out.count("Watching for work files in: ./goals") == 2
+        assert "Item complete and merged into work." in out
+
     def test_processes_all_pending_goals_in_order(self, monkeypatch):
         monkeypatch.chdir(self.temp_dir)
         self.add_goal("GOAL-first.md", "First goal.\n")

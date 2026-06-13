@@ -1669,10 +1669,12 @@ def run_goal_watch(
         if state.goals_dir != goals_dir:
             print(f"Using watched directory from saved state: {state.goals_dir}")
 
-    print(f"Watching for work files in: {state.goals_dir}")
+    watching_notice_printed = False
 
     while True:
         added = enqueue_new_goals(state, project_dir)
+        if added:
+            watching_notice_printed = False
         for name in added:
             print(f"Queued {item_type_for_file(name)} item: {name}")
 
@@ -1691,6 +1693,7 @@ def run_goal_watch(
                 print(f"Error: {error}")
                 return 1
             if claimed_merge:
+                watching_notice_printed = False
                 print(
                     f"Merge requested: {state.watch_branch} -> "
                     f"{claimed_merge['remote']}/{claimed_merge['target']}"
@@ -1709,12 +1712,14 @@ def run_goal_watch(
                 print("State preserved - re-run `dvx watch` to retry from the failed step.")
                 return 1
             print(f"Merged {state.watch_branch} into {merged_into} and pushed.")
+            watching_notice_printed = False
             continue
 
         merge_blocked = bool(state.blocked and state.blocked.get("merge_file"))
         if state.current is None and should_claim and not merge_blocked:
             claimed = claim_next_goal(state, project_dir)
             if claimed:
+                watching_notice_printed = False
                 print(
                     f"Working on {claimed.get('item_type', item_type_for_file(claimed['goal_file']))} "
                     f"item: {claimed['goal_file']} (branch: {claimed['branch']})"
@@ -1737,6 +1742,7 @@ def run_goal_watch(
                 print("State preserved - re-run `dvx watch` to retry from the failed step.")
                 return 1
             print(f"Item complete and merged into {state.watch_branch}.")
+            watching_notice_printed = False
             continue
 
         if state.blocked:
@@ -1744,6 +1750,10 @@ def run_goal_watch(
                 return 1
             time.sleep(poll_interval)
             continue
+
+        if not watching_notice_printed:
+            print(f"Watching for work files in: {state.goals_dir}")
+            watching_notice_printed = True
 
         if once:
             return 0
