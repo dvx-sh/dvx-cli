@@ -83,7 +83,6 @@ def _save_status_override(plan_filepath: Path, task_id: str, status: TaskStatus)
     # Ensure .dvx directory exists
     status_file.parent.mkdir(exist_ok=True)
 
-    # Load existing
     if status_file.exists():
         try:
             data = json.loads(status_file.read_text())
@@ -264,21 +263,34 @@ def _parse_with_claude(filepath: Path) -> list[Task]:
     tokens_timeout = tokens // 100  # Add 1 second per 100 tokens
     parse_timeout = min(base_timeout + tokens_timeout, 600)  # Cap at 10 minutes
 
-    prompt = f"""Analyze this plan file and extract all tasks/phases/steps that need to be implemented.
+    prompt = f"""Analyze this plan file and extract all tasks that need to be implemented.
 
 PLAN FILE CONTENT:
 ---
 {content}
 ---
 
-Extract each distinct task/phase/step that represents a unit of work to be implemented.
+WHAT COUNTS AS A TASK:
+1. Checkbox items: Lines starting with "- [ ]" or "- [x]" (unchecked/checked)
+2. Items in sections explicitly named "Tasks", "Implementation Tasks", "Implementation Steps", or "Phases"
+3. Numbered items (1., 2., etc.) ONLY if they describe work to implement
+
+WHAT IS NOT A TASK:
+- Items in "Files to Modify" sections (these are reference, not tasks)
+- Items in "Testing" or "Verification" sections (these are QA steps, not implementation)
+- Code examples or snippets
+- Documentation or explanation text
+- "Consider also" or optional suggestions
+
 For each task, determine:
-1. A unique ID (use phase numbers like "1", "2", "3" or "1.1", "1.2" if nested)
+1. A unique ID (use the number/marker from the plan, e.g. "1", "2", "1.1"; otherwise generate sequential IDs)
 2. A short title (the main heading or summary)
 3. A description (the details/requirements for that task)
-4. Status: "pending" (not started), "in_progress", "done", or "blocked"
-   - Look for markers like [x], [DONE], [IN_PROGRESS], [BLOCKED], checkboxes, etc.
-   - If no status marker, assume "pending"
+4. Status derived from the checkbox/marker:
+   - [x] or [DONE] -> "done"
+   - [ ] (or no marker) -> "pending"
+   - [IN_PROGRESS] -> "in_progress"
+   - [BLOCKED] -> "blocked"
 
 Return ONLY valid JSON in this exact format (no markdown, no explanation):
 {{
@@ -294,8 +306,7 @@ Return ONLY valid JSON in this exact format (no markdown, no explanation):
 }}
 
 Important:
-- Extract actionable implementation tasks, not just documentation sections
-- If the plan has numbered phases (Phase 1, Phase 2, etc.), treat each phase as a task
+- Extract only actionable implementation tasks as defined above, not documentation, reference, or QA sections
 - Include enough description for an implementer to understand what to do
 - line_number should be approximate (the line where the task heading appears)
 - Return an empty tasks array if no actionable tasks are found
@@ -323,7 +334,7 @@ Important:
             logger.warning(f"Claude returned empty output (attempt {attempt + 1}/{max_retries})")
             if attempt < max_retries - 1:
                 import time
-                time.sleep(2)  # Brief delay before retry
+                time.sleep(2)
                 continue
             else:
                 raise RuntimeError("Claude returned empty output after all retries")
@@ -336,7 +347,7 @@ Important:
 
         try:
             data = json.loads(output)
-            break  # Success - exit retry loop
+            break
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse Claude's JSON response (attempt {attempt + 1}/{max_retries}): {e}")
             logger.error(f"Raw output: {output[:500]}")
