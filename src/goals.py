@@ -1,16 +1,14 @@
 """
 Watched work queue processing for `dvx watch`.
 
-Watches a work directory (default .dvx/todo/) and processes files one at a
-time: each file gets its own working branch, is handed to the selected agent,
-and is merged back into the branch that was active when the watcher started,
-which is then pushed to its remote (when one exists) so remote reviewers see
-the work.
+Watches a work directory (default .dvx/todo/) and processes regular files one
+at a time through the current dvx run loop. Each file gets its own working
+branch, is handed to the selected agent, and is merged back into the branch that
+was active when the watcher started, which is then pushed to its remote (when
+one exists) so remote reviewers see the work.
 
-GOAL*.md files use Claude Code's dedicated /goal flow for Claude models and a
-Codex exec prompt for GPT models. Every other regular file uses the current dvx
-run loop, with the watched input copied to a stable .dvx/watch/ snapshot before
-the run starts so the live inbox file is never part of the work branch commits.
+The watched input is copied to a stable .dvx/watch/ snapshot before the run
+starts so the live inbox file is never part of the work branch commits.
 
 The watched directory lives under .dvx/ so it is created by dvx itself and
 is already gitignored - other sessions can queue work simply by dropping files
@@ -45,7 +43,6 @@ from typing import Callable, Optional
 
 from claude_session import (
     SessionResult,
-    is_gpt_model,
 )
 from claude_session import (
     resolve_agent_model as resolve_claude_model,
@@ -65,13 +62,9 @@ RUN_ITEM_CONTENT_DIR = "run-items"
 QUEUED_GOAL_SNAPSHOT_DIR = "queued-goals"
 QUEUED_GOAL_SNAPSHOT_MANIFEST = "manifest.json"
 WATCH_FILE_GLOB = "*"
+# Legacy value retained for older saved state; new watch items are always run.
 ITEM_TYPE_GOAL = "goal"
 ITEM_TYPE_RUN = "run"
-GOAL_TIMEOUT_SECONDS = 4 * 60 * 60
-# The built-in /goal command caps its condition argument; passing whole goal
-# files inline trips it, so the condition references the snapshot file instead.
-GOAL_CONDITION_MAX_CHARS = 4000
-GOAL_REJECTION_SIGNATURE = "Goal condition is limited to"
 COMMIT_TIMEOUT_SECONDS = 30 * 60
 DEFAULT_TODO_DIR = ".dvx/todo"
 # Backward-compatible internal alias for callers importing the old constant.
@@ -106,7 +99,7 @@ SYNC_PUSH_MAX_ATTEMPTS = 3
 # before recording the status.
 STATUS_CLAIMED = "claimed"            # popped from queue, content snapshotted
 STATUS_BRANCHED = "branched"          # working branch exists and is checked out
-STATUS_RAN = "ran"                    # Claude Code finished the /goal session
+STATUS_RAN = "ran"                    # Agent finished the run session
 STATUS_GOAL_DELETED = "goal_deleted"  # watched file removed from todo dir
 STATUS_COMMITTED = "committed"        # all changes committed on working branch
 STATUS_MERGED = "merged"              # working branch merged into watch branch
@@ -218,8 +211,6 @@ def _claim_content_file(
     content: str,
     project_dir: Optional[str] = None,
 ) -> Path:
-    if item_type == ITEM_TYPE_GOAL:
-        return current_goal_content_file(project_dir)
     return _new_run_item_content_file(goal_file_name, content, project_dir)
 
 
@@ -471,92 +462,13 @@ def _ensure_branch_creation_claim(
 # Agent runners
 # ---------------------------------------------------------------------------
 
-def build_goal_prompt(goal_content: str, project_dir: Optional[str] = None) -> str:
-    """
-    Build the /goal prompt for a goal session.
-
-    The /goal condition is capped at GOAL_CONDITION_MAX_CHARS, so the full goal
-    content is never passed inline. Instead the condition points at the snapshot
-    file the watcher wrote at claim time; the session reads it as its full
-    instructions. The snapshot is (re)written here so the referenced path is
-    always valid, even when recovering from partial state.
-    """
-    ensure_dvx_dir(GOALS_STATE_NAME, project_dir)
-    content_file = current_goal_content_file(project_dir)
-    content_file.write_text(goal_content)
-    return (
-        f"/goal Complete the goal specified in the file {content_file}. "
-        "Read that file first - it is the complete instruction set: requirements, "
-        "scope limits, decisions already made, verification commands, and rules. "
-        "The goal is met only when every requirement in that file is implemented "
-        "and every verification command in it passes. Do not modify anything "
-        "under .dvx/ (including that file)."
-    )
-
-
-def build_codex_goal_prompt(goal_content: str, project_dir: Optional[str] = None) -> str:
-    """
-    Build a Codex exec prompt for a watched GOAL file.
-
-    Codex exec is already non-interactive, so do not rely on Claude Code's
-    `/goal` slash command. The prompt explicitly asks Codex to plan, implement,
-    self-review, and verify before finishing.
-    """
-    ensure_dvx_dir(GOALS_STATE_NAME, project_dir)
-    content_file = current_goal_content_file(project_dir)
-    content_file.write_text(goal_content)
-    return (
-        f"Complete the goal specified in the file `{content_file}`.\n\n"
-        "Workflow requirements:\n"
-        "1. Read that file first; it is the complete instruction set: requirements, "
-        "scope limits, decisions already made, verification commands, and rules.\n"
-        "2. Make a concise plan, implement the full requested change, review your "
-        "own diff, and run the smallest verification that proves correctness.\n"
-        "3. Continue fixing issues until the goal requirements are met and the "
-        "verification commands pass, or report a concrete blocker.\n"
-        "4. Do not modify anything under `.dvx/` including the goal snapshot file.\n"
-        "5. Do not ask for user input; use safe, reversible defaults when needed."
-    )
-
-
-def run_goal_with_claude(
-    goal_content: str,
-    cwd: Optional[str] = None,
-    project_dir: Optional[str] = None,
-    model: Optional[str] = None,
-) -> SessionResult:
-    """Run the selected agent for the goal contents."""
-    selected_model = resolve_claude_model(model)
-    if is_gpt_model(selected_model):
-        prompt = build_codex_goal_prompt(goal_content, project_dir)
-    else:
-        prompt = build_goal_prompt(goal_content, project_dir)
-        condition_len = len(prompt) - len("/goal ")
-        if condition_len > GOAL_CONDITION_MAX_CHARS:
-            return SessionResult(
-                output="",
-                session_id=None,
-                success=False,
-                blocked=True,
-                block_reason=(
-                    f"goal condition is {condition_len} chars, over the /goal limit "
-                    f"of {GOAL_CONDITION_MAX_CHARS}"
-                ),
-            )
-    return run_claude(
-        prompt=prompt,
-        cwd=cwd,
-        model=selected_model,
-        timeout=GOAL_TIMEOUT_SECONDS,
-    )
-
 
 def run_item_with_orchestrator(
     plan_file: str,
     cwd: Optional[str] = None,
     model: Optional[str] = None,
 ) -> SessionResult:
-    """Run the current dvx run flow for a watched non-GOAL input."""
+    """Run the current dvx run flow for a watched input."""
     previous_cwd = Path.cwd()
     try:
         if cwd is not None:
@@ -628,10 +540,7 @@ def resolve_merge_conflicts_with_claude(
 # ---------------------------------------------------------------------------
 
 def item_type_for_file(file_name: str) -> str:
-    """Classify watched inputs: GOAL*.md uses /goal; every other file uses dvx run."""
-    path = Path(file_name)
-    if path.name.startswith("GOAL") and path.suffix == ".md":
-        return ITEM_TYPE_GOAL
+    """Classify watched regular inputs; every file uses dvx run."""
     return ITEM_TYPE_RUN
 
 
@@ -994,7 +903,9 @@ def _checkout_owned_goal_branch(state: GoalState) -> tuple[bool, str]:
 
 
 def _current_item_type(state: GoalState) -> str:
-    return state.current.get("item_type") or item_type_for_file(state.current["goal_file"])
+    # Saved state from older versions may still say "goal"; resume it through
+    # the run path now that watch no longer depends on a dedicated goal command.
+    return ITEM_TYPE_RUN
 
 
 def _validate_runner_commits(state: GoalState) -> tuple[bool, str]:
@@ -1053,11 +964,8 @@ def _step_run_claude(
     if not ok:
         return False, error
 
-    item_type = _current_item_type(state)
     content_file = _current_content_file(state, project_dir)
-    if content_file.exists():
-        content = content_file.read_text()
-    else:
+    if not content_file.exists():
         goal_path = Path(state.goals_dir) / state.current["goal_file"]
         if not goal_path.exists():
             return False, f"Watched file contents unavailable for {state.current['goal_file']}"
@@ -1072,29 +980,13 @@ def _step_run_claude(
     guard_ok = True
     guard_error = ""
     try:
-        if item_type == ITEM_TYPE_GOAL:
-            result = claude_runner(content)
-        else:
-            result = run_runner(str(content_file))
+        result = run_runner(str(content_file))
     finally:
         guard_ok, guard_error = _finish_queued_goal_guard(state, project_dir)
     if not guard_ok:
         return False, guard_error
     if not result.success:
         return False, f"Agent session failed: {result.block_reason or 'session did not succeed'}"
-    if item_type == ITEM_TYPE_GOAL:
-        if GOAL_REJECTION_SIGNATURE in result.output:
-            return False, f"/goal rejected the goal: {result.output.strip()[:300]}"
-        if result.result_event_seen is False:
-            # A cleanly finished session always emits a result event; without one
-            # the session was cut short (rate limit, crash) and the goal cannot be
-            # trusted as done.
-            return False, "Goal session was truncated before finishing (no result event)"
-        if result.tool_use_count == 0:
-            # A goal session that never used a single tool cannot have done any
-            # work - treat it as a failure instead of silently completing.
-            summary = result.output.strip()[:300] or "<no output>"
-            return False, f"Goal session ended without doing any work (no tool use). Output: {summary}"
     ok, error = _validate_runner_commits(state)
     if not ok:
         return False, error
@@ -1337,12 +1229,18 @@ def process_current_goal(
     The status field records the last COMPLETED step, so this can resume
     after a crash at any point. Returns (ok, error).
     """
+    if run_runner is None:
+        if claude_runner is not None:
+            # Existing tests and some legacy callers inject a content-based
+            # runner. Adapt it to the snapshot-file runner used by watch now.
+            def run_runner(plan_file):
+                return claude_runner(Path(plan_file).read_text())
+        else:
+            def run_runner(plan_file):
+                return run_item_with_orchestrator(plan_file, cwd=project_dir, model=model)
     if claude_runner is None:
         def claude_runner(content):
-            return run_goal_with_claude(content, project_dir=project_dir, model=model)
-    if run_runner is None:
-        def run_runner(plan_file):
-            return run_item_with_orchestrator(plan_file, cwd=project_dir, model=model)
+            return run_runner(content)
     if commit_runner is None:
         def commit_runner(goals_dir):
             return commit_logical_groups_with_claude(goals_dir, model=model)

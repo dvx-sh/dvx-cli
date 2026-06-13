@@ -15,7 +15,6 @@ import goals as goals_module
 from claude_session import DEFAULT_CLAUDE_MODEL, SessionResult
 from goals import (
     DEFAULT_TODO_DIR,
-    ITEM_TYPE_GOAL,
     ITEM_TYPE_RUN,
     MERGE_FILE_NAME,
     MERGE_STATUS_CLAIMED,
@@ -120,59 +119,6 @@ class GitRepoTestCase:
         return goal
 
 
-class TestGoalPrompt:
-    def test_condition_references_snapshot_file_not_inline_content(self, monkeypatch, tmp_path):
-        captured = {}
-
-        def fake_run_claude(prompt, cwd=None, model=None, timeout=None):
-            captured["prompt"] = prompt
-            return SessionResult(output="", session_id="s", success=True, tool_use_count=3)
-
-        monkeypatch.setattr(goals_module, "run_claude", fake_run_claude)
-
-        # Far larger than the /goal condition cap - must never be inlined.
-        big_goal = "Do many things.\n" * 700
-        result = goals_module.run_goal_with_claude(big_goal, project_dir=str(tmp_path))
-
-        assert result.success
-        prompt = captured["prompt"]
-        assert prompt.startswith("/goal ")
-        condition = prompt[len("/goal "):]
-        assert len(condition) <= goals_module.GOAL_CONDITION_MAX_CHARS
-        assert big_goal not in prompt
-        content_file = current_goal_content_file(str(tmp_path))
-        assert str(content_file) in prompt
-        assert content_file.read_text() == big_goal
-
-    def test_gpt_goal_uses_codex_prompt_not_claude_slash_goal(self, monkeypatch, tmp_path):
-        captured = {}
-
-        def fake_run_claude(prompt, cwd=None, model=None, timeout=None):
-            captured["prompt"] = prompt
-            captured["model"] = model
-            return SessionResult(output="", session_id="s", success=True, tool_use_count=None)
-
-        monkeypatch.setattr(goals_module, "run_claude", fake_run_claude)
-
-        result = goals_module.run_goal_with_claude(
-            "Build with Codex.\n",
-            project_dir=str(tmp_path),
-            model="gpt-5.5",
-        )
-
-        assert result.success
-        assert captured["model"] == "gpt-5.5"
-        assert not captured["prompt"].startswith("/goal ")
-        assert "Make a concise plan" in captured["prompt"]
-        assert "Do not ask for user input" in captured["prompt"]
-
-    def test_snapshot_file_rewritten_when_missing(self, tmp_path):
-        prompt = goals_module.build_goal_prompt("Small goal.\n", project_dir=str(tmp_path))
-        content_file = current_goal_content_file(str(tmp_path))
-        assert content_file.read_text() == "Small goal.\n"
-        assert str(content_file) in prompt
-
-
 class TestGoalStatePersistence:
     def setup_method(self):
         self.temp_dir = tempfile.mkdtemp()
@@ -248,9 +194,9 @@ class TestQueueScanning(GitRepoTestCase):
     @pytest.mark.parametrize(
         ("file_name", "expected"),
         [
-            ("GOAL.md", ITEM_TYPE_GOAL),
-            ("GOAL-do-something.md", ITEM_TYPE_GOAL),
-            ("GOALfoo.md", ITEM_TYPE_GOAL),
+            ("GOAL.md", ITEM_TYPE_RUN),
+            ("GOAL-do-something.md", ITEM_TYPE_RUN),
+            ("GOALfoo.md", ITEM_TYPE_RUN),
             ("GOAL.txt", ITEM_TYPE_RUN),
             ("PLAN-x.md", ITEM_TYPE_RUN),
             ("TASK-x.md", ITEM_TYPE_RUN),
@@ -337,7 +283,7 @@ class TestQueueScanning(GitRepoTestCase):
         assert current["branch"] == "goal-one"
         assert current["status"] == STATUS_CLAIMED
         assert state.queue == []
-        assert current_goal_content_file().read_text() == "Build feature one.\n"
+        assert Path(current["content_file"]).read_text() == "Build feature one.\n"
         assert current["dirty_baseline"] == []
         assert state.blocked is None
         # Claim is persisted so a crash right after still knows the goal.
@@ -353,7 +299,7 @@ class TestQueueScanning(GitRepoTestCase):
         current = claim_next_goal(state)
 
         assert current["goal_file"] == "GOAL-one.md"
-        assert current_goal_content_file().read_text() == "Edited before claim.\n"
+        assert Path(current["content_file"]).read_text() == "Edited before claim.\n"
         assert goal.read_text() == "Edited before claim.\n"
 
     def test_claim_treats_user_deleted_queued_goal_as_missing(self, monkeypatch):
@@ -905,83 +851,6 @@ class TestProcessGoal(GitRepoTestCase):
         )
         assert ok, error
         assert state.current is None
-
-    def test_goal_rejection_output_fails_run_step(self, monkeypatch):
-        monkeypatch.chdir(self.temp_dir)
-        self.add_goal("GOAL-add-feature-x.md")
-        state = self.new_state()
-        enqueue_new_goals(state)
-        claim_next_goal(state)
-
-        # The /goal command rejects oversized conditions with plain text and
-        # exits 0 - the watcher must not mistake that for a completed goal.
-        def rejected_runner(content):
-            return SessionResult(
-                output="Goal condition is limited to 4000 characters (got 6953)",
-                session_id="s",
-                success=True,
-                tool_use_count=0,
-            )
-
-        ok, error = process_current_goal(
-            state, claude_runner=rejected_runner, commit_runner=fail_commit_runner
-        )
-
-        assert ok is False
-        assert "/goal rejected the goal" in error
-        assert state.current["status"] == STATUS_BRANCHED
-        assert (Path(self.temp_dir) / "goals" / "GOAL-add-feature-x.md").exists()
-
-    def test_session_without_tool_use_fails_run_step(self, monkeypatch):
-        monkeypatch.chdir(self.temp_dir)
-        self.add_goal("GOAL-add-feature-x.md")
-        state = self.new_state()
-        enqueue_new_goals(state)
-        claim_next_goal(state)
-
-        def idle_runner(content):
-            return SessionResult(
-                output="All done!",
-                session_id="s",
-                success=True,
-                tool_use_count=0,
-            )
-
-        ok, error = process_current_goal(
-            state, claude_runner=idle_runner, commit_runner=fail_commit_runner
-        )
-
-        assert ok is False
-        assert "without doing any work" in error
-        assert state.current["status"] == STATUS_BRANCHED
-        assert (Path(self.temp_dir) / "goals" / "GOAL-add-feature-x.md").exists()
-
-    def test_truncated_session_fails_run_step(self, monkeypatch):
-        monkeypatch.chdir(self.temp_dir)
-        self.add_goal("GOAL-add-feature-x.md")
-        state = self.new_state()
-        enqueue_new_goals(state)
-        claim_next_goal(state)
-
-        # Rate-limited/crashed sessions end without a result event - the goal
-        # cannot be trusted as done even if the process exited 0.
-        def truncated_runner(content):
-            return SessionResult(
-                output="partial work...",
-                session_id="s",
-                success=True,
-                tool_use_count=12,
-                result_event_seen=False,
-            )
-
-        ok, error = process_current_goal(
-            state, claude_runner=truncated_runner, commit_runner=fail_commit_runner
-        )
-
-        assert ok is False
-        assert "truncated" in error
-        assert state.current["status"] == STATUS_BRANCHED
-        assert (Path(self.temp_dir) / "goals" / "GOAL-add-feature-x.md").exists()
 
     def test_session_with_tool_use_completes(self, monkeypatch):
         monkeypatch.chdir(self.temp_dir)
@@ -1590,43 +1459,37 @@ class TestRunGoalWatch(GitRepoTestCase):
         state = load_goal_state()
         assert [c["goal_file"] for c in state.completed] == ["GOAL-older.md", "GOAL-newer.md"]
 
-    def test_watch_dispatches_goal_files_to_goal_and_other_files_to_run(self, monkeypatch):
+    def test_watch_dispatches_all_regular_files_to_run(self, monkeypatch):
         monkeypatch.chdir(self.temp_dir)
-        self.add_goal("GOAL-first.md", "First goal.\n")
+        self.add_goal("GOAL-first.md", "First legacy-named item.\n")
         self.add_goal("TODO-second.md", "Second run item.\n")
         import os
 
         os.utime(Path("goals") / "GOAL-first.md", (1, 1))
         os.utime(Path("goals") / "TODO-second.md", (2, 2))
 
-        goal_seen = []
         run_seen = []
-
-        def implement_goal(content):
-            goal_seen.append(content.strip())
-            Path("goal-output.txt").write_text("goal flow\n")
 
         def run_item(plan_file):
             run_seen.append(Path(plan_file).read_text().strip())
-            Path("run-output.txt").write_text("run flow\n")
+            Path(f"run-output-{len(run_seen)}.txt").write_text("run flow\n")
             return SessionResult(output="", session_id="s", success=True)
 
         rc = run_goal_watch(
             "work",
             goals_dir="./goals",
             once=True,
-            claude_runner=make_runner(side_effect=implement_goal),
+            claude_runner=fail_goal_runner,
             run_runner=run_item,
             commit_runner=noop_commit_runner,
         )
 
         assert rc == 0
-        assert goal_seen == ["First goal."]
-        assert run_seen == ["Second run item."]
-        assert (Path(self.temp_dir) / "goal-output.txt").exists()
-        assert (Path(self.temp_dir) / "run-output.txt").exists()
+        assert run_seen == ["First legacy-named item.", "Second run item."]
+        assert (Path(self.temp_dir) / "run-output-1.txt").exists()
+        assert (Path(self.temp_dir) / "run-output-2.txt").exists()
         state = load_goal_state()
-        assert [c["item_type"] for c in state.completed] == [ITEM_TYPE_GOAL, ITEM_TYPE_RUN]
+        assert [c["item_type"] for c in state.completed] == [ITEM_TYPE_RUN, ITEM_TYPE_RUN]
         assert scan_goal_files(Path("goals")) == []
 
     def test_non_goal_watch_items_get_distinct_run_state_paths(self, monkeypatch):

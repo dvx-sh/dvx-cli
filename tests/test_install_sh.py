@@ -15,6 +15,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 INSTALL_SH = REPO_ROOT / "install.sh"
+TODO_TEMPLATE = "# todo template\n"
 
 
 def write_payload(root: Path) -> None:
@@ -31,6 +32,7 @@ def write_payload(root: Path) -> None:
     (root / "plans").mkdir()
     (root / "src" / "cli.py").write_text("")
     (root / "src" / "skills" / "demo.md").write_text("# demo skill\n")
+    (root / "TODO.md.example").write_text(TODO_TEMPLATE)
     (root / "pyproject.toml").write_text('[project]\nname = "dvx"\n')
     (root / "tasks.py").write_text("")
     (root / "uv.lock").write_text("")
@@ -88,6 +90,7 @@ class TestLocalMode:
         assert "local clone" in result.stdout
         assert (home / ".dvx" / "bin" / "setup").exists()
         assert (home / ".dvx" / "src" / "cli.py").exists()
+        assert (home / ".dvx" / "TODO.md.example").read_text() == TODO_TEMPLATE
         assert (home / ".dvx" / "setup-ran").exists()
         assert (home / ".claude" / "commands" / "dvx" / "demo.md").exists()
 
@@ -126,6 +129,7 @@ class TestRemoteMode:
         assert "local clone" not in result.stdout
         assert "Downloading" in result.stdout
         assert (home / ".dvx" / "src" / "cli.py").exists()
+        assert (home / ".dvx" / "TODO.md.example").read_text() == TODO_TEMPLATE
         assert (home / ".dvx" / "setup-ran").exists()
 
     def test_piped_execution_chooses_remote(self, tmp_path, home, remote_tarball):

@@ -1,0 +1,221 @@
+# TODO file examples for `dvx watch`
+
+This file is for AI coding harnesses such as Codex, Claude Code, or another
+agent that is helping a user install and use `dvx`.
+
+After installation, this template is available at:
+
+```bash
+~/.dvx/TODO.md.example
+```
+
+Do not download another copy with curl. Read this installed file, then create
+one well-scoped work file in the user's project under:
+
+```bash
+.dvx/todo/
+```
+
+## How `dvx watch` processes the inbox
+
+- `dvx watch` watches `.dvx/todo/` by default.
+- Every regular file in that directory is processed through the same
+  non-interactive flow as `dvx run`.
+- Regular work files are processed oldest-first by file modification time, then
+  by filename when modification times tie.
+- Each regular file gets its own branch. The filename becomes the branch slug.
+- The watcher snapshots the file before running work, deletes the inbox file
+  after it is claimed, commits the resulting changes in logical groups, merges
+  the branch back into the watch branch, deletes the work branch, and pushes the
+  watch branch when a remote exists.
+- The watcher only starts work when the tree is clean. If the tree is dirty, it
+  reports the blocking paths and leaves the file in `.dvx/todo/`.
+- The agent that writes inbox files must not edit `.dvx/watch/` state files or
+  queued files after dropping them into the inbox.
+
+## Regular work files
+
+Use a regular file when you want `dvx` to implement, review, test, commit, and
+merge a self-contained task.
+
+Recommended filename patterns:
+
+```text
+TODO-add-rate-limit.md
+PLAN-refactor-login-flow.md
+TASK-fix-empty-state.txt
+FIX-handle-timeout.md
+DOC-update-install-guide.md
+```
+
+Use lowercase words separated by dashes after the prefix. Keep the task small
+enough for one non-interactive session.
+
+### Example: TODO file
+
+Create `.dvx/todo/TODO-add-rate-limit.md`:
+
+```markdown
+# Task: Add API rate limiting
+
+## Why
+
+The public API currently accepts unlimited requests from a single client, which
+can overload the service and hide abusive usage.
+
+## Requirements
+
+1. Add per-client rate limiting to the API request path.
+2. Return a clear 429 response when the limit is exceeded.
+3. Add tests for allowed requests and rejected requests.
+4. Keep existing authentication behavior unchanged.
+
+## Out of scope
+
+- Do not add billing-tier specific limits.
+- Do not change deployment configuration.
+
+## Verification
+
+```bash
+pytest tests/test_api_rate_limit.py
+ruff check src tests
+```
+```
+
+### Example: PLAN file
+
+Create `.dvx/todo/PLAN-split-settings-module.md`:
+
+```markdown
+# Plan: Split settings module
+
+## Current problem
+
+`src/settings.py` mixes config parsing, environment defaults, and validation.
+
+## Tasks
+
+- [ ] Move validation helpers into `src/settings_validation.py`.
+- [ ] Keep the public `load_settings()` API unchanged.
+- [ ] Update or add focused tests for invalid environment values.
+
+## Verification
+
+```bash
+pytest tests/test_settings.py
+ruff check src tests
+```
+```
+
+### Example: quick text task
+
+Create `.dvx/todo/FIX-login-timeout.txt`:
+
+```text
+Fix the login timeout regression.
+
+Current behavior:
+- Login requests fail after 5 seconds even when the configured timeout is 30 seconds.
+
+Requirements:
+- Find the timeout source.
+- Preserve the configured default.
+- Add or update a regression test.
+
+Verification:
+- pytest tests/test_login.py
+- ruff check src tests
+```
+
+## Control files
+
+Control files are macros. They are not implementation tasks.
+
+Control files run between regular queued files. `MERGE` runs before `SYNC`;
+`STOP` is a clean-exit signal checked before new work and after active work or
+control processing.
+
+### MERGE
+
+Create `.dvx/todo/MERGE` to merge the watch branch into a remote branch.
+
+Empty file:
+
+```bash
+touch .dvx/todo/MERGE
+```
+
+This targets the remote default branch.
+
+Named target:
+
+```bash
+printf 'dev\n' > .dvx/todo/MERGE
+```
+
+Rules:
+
+- The file must be empty or contain exactly one branch name.
+- Use `dev`, not `origin/dev`.
+- Do not add prose or comments.
+- The watcher fetches, merges the remote target into the watch branch, then
+  fast-forwards the remote target to the watch branch tip.
+- Pushes are never forced. If the remote target moves, the watcher refetches and
+  retries.
+
+### SYNC
+
+Create `.dvx/todo/SYNC` to merge a remote branch into the watch branch and push
+the watch branch.
+
+Empty file:
+
+```bash
+touch .dvx/todo/SYNC
+```
+
+This syncs from the remote default branch.
+
+Named source:
+
+```bash
+printf 'dev\n' > .dvx/todo/SYNC
+```
+
+Rules:
+
+- The file must be empty or contain exactly one branch name.
+- Use `dev`, not `origin/dev`.
+- Do not add prose or comments.
+- If pushing the watch branch is rejected because the remote watch branch moved,
+  the watcher fetches, merges the remote watch branch, refetches and re-merges
+  the sync source, then retries without force-pushing.
+
+### STOP
+
+Create `.dvx/todo/STOP` to ask the watcher to exit cleanly.
+
+```bash
+touch .dvx/todo/STOP
+```
+
+Rules:
+
+- File content is ignored.
+- If work, `MERGE`, or `SYNC` is active, the watcher exits after that finishes.
+- If the watcher is idle or blocked, it exits immediately.
+- The file is consumed when noticed.
+
+## Rules for the agent writing `.dvx/todo/`
+
+- Write only one regular work file per independent task.
+- Make each file self-contained. The implementer sees the file, not the chat
+  that produced it.
+- Pre-answer decisions. The implementer is non-interactive.
+- Include exact verification commands.
+- Do not ask the implementer to push, open a pull request, merge branches, or
+  edit `.dvx/` state. The watcher owns integration.
+- Do not modify files already queued in `.dvx/todo/` while `dvx watch` is
+  running.
+- Use `MERGE`, `SYNC`, or `STOP` only when you want that macro behavior.

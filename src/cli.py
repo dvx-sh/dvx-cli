@@ -978,12 +978,11 @@ def cmd_watch(args) -> int:
     Watch the work directory and process files one at a time.
 
     Each watched file is queued in .dvx/watch/state.json and worked on in its
-    own branch by Claude Code. GOAL*.md files use the /goal command;
-    all other files use the same loop as `dvx run`. Changes are committed,
-    merged back into the branch watch started on (which is then pushed to its
-    remote, when one exists), and cleaned up. All state transitions are
-    persisted atomically so the watcher recovers from a crash or kill at any
-    point - just re-run `dvx watch`.
+    own branch through the same loop as `dvx run`. Changes are committed, merged
+    back into the branch watch started on (which is then pushed to its remote,
+    when one exists), and cleaned up. All state transitions are persisted
+    atomically so the watcher recovers from a crash or kill at any point - just
+    re-run `dvx watch`.
 
     Dropping a MERGE file in the watched directory merges the watch branch
     into the remote's default branch (empty file) or the branch named in
@@ -1162,7 +1161,7 @@ def main() -> int:
     watch_parser = subparsers.add_parser(
         "watch",
         help=(
-            "Watch a work directory and process GOAL*.md via /goal, other files via dvx run "
+            "Watch a work directory and process regular files via dvx run "
             "(MERGE/SYNC/STOP files control branch integration and clean exit)"
         ),
     )
