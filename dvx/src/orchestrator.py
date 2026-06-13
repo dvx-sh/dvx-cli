@@ -802,9 +802,9 @@ def parse_finalizer_result(output: str) -> dict:
     """
     Parse the finalizer's output to determine next action.
 
-    The verdict tag MUST be the first non-empty line of the output.
-    Anything else is a parse error and the orchestrator treats it as a
-    block.
+    The verdict tag MUST be placed on a line starting with it.
+    Anything else before it is ignored. If no verdict tag is found,
+    it is a parse error and the orchestrator treats it as a block.
 
     Returns dict with:
         - verdict: str | None - The parsed tag, uppercased; None on parse error
@@ -817,7 +817,7 @@ def parse_finalizer_result(output: str) -> dict:
         - suggestions: str - Full suggestions text for implementer
         - output: str - Full output
     """
-    verdict = _extract_first_line_verdict(output)
+    verdict = _extract_verdict(output)
     parse_error = verdict is None
 
     has_issues = verdict == "ISSUES"
@@ -845,18 +845,29 @@ def parse_finalizer_result(output: str) -> dict:
     }
 
 
-def _extract_first_line_verdict(output: str) -> Optional[str]:
-    """Return the uppercased verdict tag on the first non-empty line, or None."""
+def _extract_verdict(output: str) -> Optional[str]:
+    """Return the first uppercased verdict tag found on any line, or None."""
     if not output:
         return None
+
+    import re
+
+    pattern = re.compile(
+        r"^(?:[\W_]|verdict|final|result)*\[("
+        + "|".join(FINALIZE_VERDICTS)
+        + r")\](?:$|[\W_].*)",
+        re.IGNORECASE,
+    )
+
     for line in output.splitlines():
-        stripped = line.strip()
-        if not stripped:
+        line = line.strip()
+        if not line:
             continue
-        for tag in FINALIZE_VERDICTS:
-            if stripped.upper().startswith(f"[{tag}]"):
-                return tag
-        return None
+
+        match = pattern.match(line)
+        if match:
+            return match.group(1).upper()
+
     return None
 
 
@@ -1450,7 +1461,7 @@ def _run_finalization(plan_file: str, state: State, no_deslop: bool = False) -> 
 
         if result["parse_error"]:
             msg = (
-                "Finalizer output did not start with a recognized verdict tag "
+                "Finalizer output did not contain a recognized verdict tag "
                 "([APPROVED] / [SUGGESTIONS] / [ISSUES] / [CRITICAL])."
             )
             _record_finalize_verdict(plan_file, "BLOCKED", iteration)
