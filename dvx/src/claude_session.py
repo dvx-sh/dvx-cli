@@ -282,6 +282,21 @@ def _parse_stream_event(line: str) -> tuple[Optional[dict], str]:
         return None, ""  # Skip unparseable lines silently
 
 
+def _blocked_marker_from_text(text: str) -> tuple[bool, Optional[str]]:
+    """Detect explicit human-blocked markers in an agent's final text."""
+    if '[BLOCKED:' in text:
+        start = text.find('[BLOCKED:')
+        end = text.find(']', start)
+        if end > start:
+            return True, text[start + 9:end].strip()
+        return True, None
+
+    if '.dvx/BLOCKED' in text or 'BLOCKED.md' in text:
+        return True, None
+
+    return False, None
+
+
 def _parse_stream_output(events: list[dict]) -> tuple[str, Optional[str], bool, Optional[str]]:
     """
     Parse collected stream-json events for final result.
@@ -332,18 +347,7 @@ def _parse_stream_output(events: list[dict]) -> tuple[str, Optional[str], bool, 
         text_output = '\n'.join(streamed_text_parts)
         logger.warning(f"No result event; recovered {len(text_output)} chars from streamed text")
 
-    # Check for block signals in the text output
-    check_text = text_output
-    if '[BLOCKED:' in check_text:
-        is_blocked = True
-        start = check_text.find('[BLOCKED:')
-        end = check_text.find(']', start)
-        if end > start:
-            block_reason = check_text[start + 9:end].strip()
-
-    # Also check for BLOCKED file creation mention
-    if '.dvx/BLOCKED' in check_text or 'BLOCKED.md' in check_text:
-        is_blocked = True
+    is_blocked, block_reason = _blocked_marker_from_text(text_output)
 
     return text_output, session_id, is_blocked, block_reason
 
@@ -615,12 +619,12 @@ def run_codex(
     disable_tools: bool = False,
 ) -> SessionResult:
     """
-    Run Codex non-interactively with YOLO permissions for GPT-family models.
+    Run Codex non-interactively for GPT-family models.
 
-    ``disable_tools`` is accepted for API symmetry with ``run_claude``; Codex
-    exec has no matching flag, so model checks rely on a no-op prompt instead.
+    Codex exec does not expose a true no-tools flag. When ``disable_tools`` is
+    requested, use a read-only sandbox and do not bypass approvals so parsing
+    and model-check prompts cannot silently run with workspace write access.
     """
-    del disable_tools
     cwd = cwd or os.getcwd()
     model = resolve_agent_model(model)
     prompt_parts = []
@@ -639,15 +643,27 @@ def run_codex(
         model,
         "--cd",
         cwd,
-        "--sandbox",
-        "danger-full-access",
-        "--dangerously-bypass-approvals-and-sandbox",
+    ]
+    if disable_tools:
+        cmd.extend([
+            "--sandbox",
+            "read-only",
+            "-c",
+            'approval_policy="never"',
+        ])
+    else:
+        cmd.extend([
+            "--sandbox",
+            "danger-full-access",
+            "--dangerously-bypass-approvals-and-sandbox",
+        ])
+    cmd.extend([
         "-c",
         f'model_reasoning_effort="{CODEX_EFFORT}"',
         "--json",
         "--output-last-message",
         last_message_path,
-    ]
+    ])
     if session_id:
         logger.debug("Ignoring session_id for codex exec; sessions are non-interactive per invocation")
     cmd.append(final_prompt)
@@ -687,6 +703,7 @@ def run_codex(
 
         event_text = _codex_text_from_events(stream_events)
         output = last_message or event_text or completed.stdout.strip()
+        blocked, block_reason = _blocked_marker_from_text(output)
         is_error = _codex_result_is_error(stream_events)
         failure_reason = None
         if completed.returncode != 0 or is_error:
@@ -705,8 +722,8 @@ def run_codex(
             output=output,
             session_id=_codex_session_id(stream_events) or session_id,
             success=completed.returncode == 0 and not is_error,
-            blocked=failure_reason is not None,
-            block_reason=failure_reason,
+            blocked=blocked or failure_reason is not None,
+            block_reason=block_reason or failure_reason,
             tool_use_count=_count_codex_tool_events(stream_events),
             result_event_seen=_codex_result_event_seen(stream_events, last_message),
         )

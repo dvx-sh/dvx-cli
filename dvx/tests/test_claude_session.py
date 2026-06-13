@@ -233,6 +233,70 @@ class TestRunCodex:
         assert result.blocked is True
         assert "codex exited with status 7" in result.block_reason
 
+    def test_codex_successful_blocked_marker_is_blocked(self, monkeypatch, tmp_path):
+        write_stub_codex(tmp_path, """
+            import json
+            import sys
+            from pathlib import Path
+
+            out = Path(sys.argv[sys.argv.index("--output-last-message") + 1])
+            out.write_text("[BLOCKED: need credentials]")
+            print(json.dumps({"type": "result", "result": "[BLOCKED: need credentials]",
+                              "session_id": "codex-session"}))
+        """)
+        monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+
+        result = run_agent("hello", cwd=str(tmp_path), timeout=30, model="gpt-5.5")
+
+        assert result.success is True
+        assert result.blocked is True
+        assert result.block_reason == "need credentials"
+
+    def test_codex_successful_blocked_file_mention_is_blocked(self, monkeypatch, tmp_path):
+        write_stub_codex(tmp_path, """
+            import json
+            import sys
+            from pathlib import Path
+
+            out = Path(sys.argv[sys.argv.index("--output-last-message") + 1])
+            out.write_text("See BLOCKED.md for details.")
+            print(json.dumps({"type": "result", "result": "See BLOCKED.md for details.",
+                              "session_id": "codex-session"}))
+        """)
+        monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+
+        result = run_agent("hello", cwd=str(tmp_path), timeout=30, model="gpt-5.5")
+
+        assert result.success is True
+        assert result.blocked is True
+
+    def test_codex_disable_tools_uses_read_only_without_bypass(self, monkeypatch, tmp_path):
+        write_stub_codex(tmp_path, """
+            import json
+            import sys
+            from pathlib import Path
+
+            out = Path(sys.argv[sys.argv.index("--output-last-message") + 1])
+            out.write_text(json.dumps(sys.argv))
+            print(json.dumps({"type": "result", "result": "done", "session_id": "codex-session"}))
+        """)
+        monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+
+        result = run_agent(
+            "hello",
+            cwd=str(tmp_path),
+            timeout=30,
+            model="gpt-5.5",
+            disable_tools=True,
+        )
+
+        assert result.success
+        argv = json.loads(result.output)
+        assert argv[argv.index("--sandbox") + 1] == "read-only"
+        assert 'approval_policy="never"' in argv
+        assert "--dangerously-bypass-approvals-and-sandbox" not in argv
+        assert "danger-full-access" not in argv
+
     def test_codex_result_without_tool_events_reports_zero_tool_uses(self, monkeypatch, tmp_path):
         write_stub_codex(tmp_path, """
             import json
