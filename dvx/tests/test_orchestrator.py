@@ -31,10 +31,10 @@ class TestClaudeModelOverride:
 
         monkeypatch.setattr(orchestrator_module, "run_claude", fake_run_claude)
 
-        with claude_model_override("claude-fable-5"):
+        with claude_model_override("custom-override-model"):
             orchestrator_module.run_skill("finalize", {}, model="opus")
 
-        assert captured["model"] == "claude-fable-5"
+        assert captured["model"] == "custom-override-model"
 
     def test_override_applies_to_direct_claude_calls(self, monkeypatch):
         captured = {}
@@ -45,10 +45,10 @@ class TestClaudeModelOverride:
 
         monkeypatch.setattr(orchestrator_module, "run_claude", fake_run_claude)
 
-        with claude_model_override("claude-fable-5"):
+        with claude_model_override("custom-override-model"):
             orchestrator_module.run_polish_commit()
 
-        assert captured["model"] == "claude-fable-5"
+        assert captured["model"] == "custom-override-model"
 
 
 class TestParseReviewResult:

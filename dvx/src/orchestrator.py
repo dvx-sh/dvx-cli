@@ -1361,7 +1361,8 @@ def run_orchestrator(
     Returns: 0 on success/completion, 1 on error/blocked/paused
     """
     try:
-        with claude_model_override(model):
+        selected_model = resolve_claude_model(model)
+        with claude_model_override(selected_model):
             return _run_orchestrator_inner(plan_file, step_mode, no_deslop=no_deslop)
     except KeyboardInterrupt:
         logger.info("Interrupted by user")

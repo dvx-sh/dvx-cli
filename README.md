@@ -24,7 +24,20 @@ In a separate terminal, in your project directory:
 dvx watch
 ```
 
-It watches `.dvx/goals/` for work files. `GOAL*.md` files keep the `/goal` flow; any other regular file (`PLAN*.md`, `TASK*.md`, `TODO*.md`, `.txt`, etc.) runs through the same loop as `dvx run`. Each file gets its own branch, a headless Claude session implements it with the Fable 5 model, and changes are committed in logical groups and merged back. A killed watcher resumes where it left off (`dvx clear` resets watcher state). The watcher only claims files when the working tree is clean — commit or stash first; blocked files are reported along with the dirty paths. Merges land on the branch the watcher was started on, which is then pushed to its remote (when one exists) — run the watcher on a dedicated branch and review the work there; nothing touches main unless you start the watcher on main.
+It watches `.dvx/goals/` for work files. `GOAL*.md` files keep the `/goal` flow; any other regular file (`PLAN*.md`, `TASK*.md`, `TODO*.md`, `.txt`, etc.) runs through the same loop as `dvx run`. Each file gets its own branch, a headless Claude session implements it with the configured Claude model (default: `claude-opus-4-8`), and changes are committed in logical groups and merged back. A killed watcher resumes where it left off (`dvx clear` resets watcher state). The watcher only claims files when the working tree is clean — commit or stash first; blocked files are reported along with the dirty paths. Merges land on the branch the watcher was started on, which is then pushed to its remote (when one exists) — run the watcher on a dedicated branch and review the work there; nothing touches main unless you start the watcher on main.
+
+
+### Claude model selection
+
+`dvx` defaults to `claude-opus-4-8`. Override it per command with `--model`, or for all commands with `DVX_MODEL`:
+
+```bash
+DVX_MODEL=claude-sonnet-4-6 dvx run PLAN-example.md
+dvx run --model claude-opus-4-8 PLAN-example.md
+dvx watch --model claude-opus-4-8
+```
+
+`dvx run`, `dvx plan`, and `dvx watch` validate the selected model before starting Claude-backed work and print a clear error if the Claude CLI cannot use it.
 
 ## Queue a goal
 

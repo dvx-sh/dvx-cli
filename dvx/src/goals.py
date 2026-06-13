@@ -2,7 +2,7 @@
 Watched work queue processing for `dvx watch`.
 
 Watches a work directory (default .dvx/goals/) and processes files one at a
-time: each file gets its own working branch, is handed to Claude Code (Fable 5),
+time: each file gets its own working branch, is handed to Claude Code,
 and is merged back into the branch that was active when the watcher started,
 which is then pushed to its remote (when one exists) so remote reviewers see
 the work.
@@ -44,7 +44,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
-from claude_session import SessionResult, run_claude
+from claude_session import SessionResult, resolve_claude_model, run_claude
 from state import ensure_dvx_dir, get_dvx_dir
 
 logger = logging.getLogger(__name__)
@@ -57,7 +57,6 @@ RUN_ITEM_CONTENT_DIR = "run-items"
 QUEUED_GOAL_SNAPSHOT_DIR = "queued-goals"
 QUEUED_GOAL_SNAPSHOT_MANIFEST = "manifest.json"
 WATCH_FILE_GLOB = "*"
-GOAL_MODEL = "claude-fable-5"
 ITEM_TYPE_GOAL = "goal"
 ITEM_TYPE_RUN = "run"
 GOAL_TIMEOUT_SECONDS = 4 * 60 * 60
@@ -466,8 +465,9 @@ def run_goal_with_claude(
     goal_content: str,
     cwd: Optional[str] = None,
     project_dir: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> SessionResult:
-    """Run Claude Code (Fable 5) with the /goal command for the goal contents."""
+    """Run Claude Code with the /goal command for the goal contents."""
     prompt = build_goal_prompt(goal_content, project_dir)
     condition_len = len(prompt) - len("/goal ")
     if condition_len > GOAL_CONDITION_MAX_CHARS:
@@ -484,20 +484,24 @@ def run_goal_with_claude(
     return run_claude(
         prompt=prompt,
         cwd=cwd,
-        model=GOAL_MODEL,
+        model=resolve_claude_model(model),
         timeout=GOAL_TIMEOUT_SECONDS,
     )
 
 
-def run_item_with_orchestrator(plan_file: str, cwd: Optional[str] = None) -> SessionResult:
-    """Run the current dvx run flow for a watched non-GOAL input using Fable 5."""
+def run_item_with_orchestrator(
+    plan_file: str,
+    cwd: Optional[str] = None,
+    model: Optional[str] = None,
+) -> SessionResult:
+    """Run the current dvx run flow for a watched non-GOAL input."""
     previous_cwd = Path.cwd()
     try:
         if cwd is not None:
             os.chdir(cwd)
         from orchestrator import run_orchestrator
 
-        exit_code = run_orchestrator(plan_file, model=GOAL_MODEL)
+        exit_code = run_orchestrator(plan_file, model=resolve_claude_model(model))
     finally:
         if cwd is not None:
             os.chdir(previous_cwd)
@@ -510,7 +514,11 @@ def run_item_with_orchestrator(plan_file: str, cwd: Optional[str] = None) -> Ses
     )
 
 
-def commit_logical_groups_with_claude(goals_dir: str, cwd: Optional[str] = None) -> SessionResult:
+def commit_logical_groups_with_claude(
+    goals_dir: str,
+    cwd: Optional[str] = None,
+    model: Optional[str] = None,
+) -> SessionResult:
     """Ask Claude Code to commit all outstanding changes in logical groups."""
     prompt = (
         "Commit all outstanding changes in this repository into logical groups.\n"
@@ -523,7 +531,7 @@ def commit_logical_groups_with_claude(goals_dir: str, cwd: Optional[str] = None)
     return run_claude(
         prompt=prompt,
         cwd=cwd,
-        model=GOAL_MODEL,
+        model=resolve_claude_model(model),
         timeout=COMMIT_TIMEOUT_SECONDS,
     )
 
@@ -532,6 +540,7 @@ def resolve_merge_conflicts_with_claude(
     target: str,
     goals_dir: str,
     cwd: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> SessionResult:
     """Ask Claude Code to resolve an in-progress merge and conclude it."""
     prompt = (
@@ -547,7 +556,7 @@ def resolve_merge_conflicts_with_claude(
     return run_claude(
         prompt=prompt,
         cwd=cwd,
-        model=GOAL_MODEL,
+        model=resolve_claude_model(model),
         timeout=COMMIT_TIMEOUT_SECONDS,
     )
 
@@ -1227,6 +1236,7 @@ def process_current_goal(
     run_runner: Optional[Callable[[str], SessionResult]] = None,
     commit_runner: Optional[Callable[[str], SessionResult]] = None,
     project_dir: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> tuple[bool, str]:
     """
     Drive the current watched item through its remaining steps.
@@ -1236,11 +1246,13 @@ def process_current_goal(
     """
     if claude_runner is None:
         def claude_runner(content):
-            return run_goal_with_claude(content, project_dir=project_dir)
+            return run_goal_with_claude(content, project_dir=project_dir, model=model)
     if run_runner is None:
         def run_runner(plan_file):
-            return run_item_with_orchestrator(plan_file, cwd=project_dir)
-    commit_runner = commit_runner or commit_logical_groups_with_claude
+            return run_item_with_orchestrator(plan_file, cwd=project_dir, model=model)
+    if commit_runner is None:
+        def commit_runner(goals_dir):
+            return commit_logical_groups_with_claude(goals_dir, model=model)
     ok, error = _migrate_legacy_run_content_file(state, project_dir)
     if not ok:
         return False, error
@@ -1490,6 +1502,7 @@ def process_merge_request(
     state: GoalState,
     merge_runner: Optional[Callable[[str], SessionResult]] = None,
     project_dir: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> tuple[bool, str]:
     """
     Drive the pending merge request through its remaining steps.
@@ -1502,7 +1515,7 @@ def process_merge_request(
     """
     if merge_runner is None:
         def merge_runner(target):
-            return resolve_merge_conflicts_with_claude(target, state.goals_dir)
+            return resolve_merge_conflicts_with_claude(target, state.goals_dir, model=model)
 
     while state.merge:
         status = state.merge["status"]
@@ -1589,6 +1602,7 @@ def run_goal_watch(
     commit_runner: Optional[Callable[[str], SessionResult]] = None,
     merge_runner: Optional[Callable[[str], SessionResult]] = None,
     project_dir: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> int:
     """
     Watch the work directory and process queued files until interrupted.
@@ -1670,7 +1684,7 @@ def run_goal_watch(
         if state.current is None and state.merge:
             merged_into = f"{state.merge['remote']}/{state.merge['target']}"
             ok, error = process_merge_request(
-                state, merge_runner=merge_runner, project_dir=project_dir
+                state, merge_runner=merge_runner, project_dir=project_dir, model=model
             )
             if not ok:
                 print(f"Error: {error}")
@@ -1698,6 +1712,7 @@ def run_goal_watch(
                 run_runner=run_runner,
                 commit_runner=commit_runner,
                 project_dir=project_dir,
+                model=model,
             )
             if not ok:
                 print(f"Error: {error}")

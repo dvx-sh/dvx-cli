@@ -39,6 +39,7 @@ class AutopilotPlan:
     skip_consensus: bool
     no_deslop: bool
     resume_from: Optional[str] = None
+    model: Optional[str] = None
 
 
 def derive_plan_filename(slug: str) -> str:
@@ -218,6 +219,7 @@ def build_plan_from_args(
     no_deslop: bool,
     explicit_plan_file: Optional[str] = None,
     resume_slug: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> AutopilotPlan:
     """Turn argparse inputs into a resolved AutopilotPlan."""
     if resume_slug:
@@ -240,4 +242,5 @@ def build_plan_from_args(
         skip_consensus=bool(skip_consensus),
         no_deslop=bool(no_deslop),
         resume_from=resume_slug,
+        model=model,
     )

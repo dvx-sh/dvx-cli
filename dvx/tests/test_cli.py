@@ -11,8 +11,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+from claude_session import DEFAULT_CLAUDE_MODEL
 from cli import (
     cmd_clear,
+    cmd_run,
     cmd_watch,
     ensure_skills_installed,
     find_continuation_queue,
@@ -285,6 +287,77 @@ class TestQueueWorkflow:
         assert len(remaining) == 0
 
 
+class TestRunCommandModel:
+    def setup_method(self):
+        self.temp_dir = tempfile.mkdtemp()
+        run_git(["init", "-b", "main"], self.temp_dir)
+        run_git(["config", "user.name", "DVX Test"], self.temp_dir)
+        run_git(["config", "user.email", "dvx@example.com"], self.temp_dir)
+        readme = Path(self.temp_dir) / "README.md"
+        readme.write_text("# test\n")
+        run_git(["add", "README.md"], self.temp_dir)
+        run_git(["commit", "-m", "init"], self.temp_dir)
+        run_git(["checkout", "-b", "work"], self.temp_dir)
+
+    def teardown_method(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_run_model_argument_overrides_env(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        Path("PLAN-test.md").write_text("# Plan\n- [ ] T1: Do work\n")
+        checked = []
+        captured = {}
+        monkeypatch.setenv("DVX_MODEL", "env-model")
+        monkeypatch.setattr("cli._check_selected_model", lambda model: checked.append(model) or (True, ""))
+        monkeypatch.setattr("cli.sync_plan_state", lambda plan_file: {"synced": 0, "added": 0})
+        monkeypatch.setattr("cli.get_plan_summary", lambda plan_file: {"total": 1, "done": 0, "in_progress": 0, "pending": 1})
+        monkeypatch.setattr("cli.get_next_pending_task", lambda plan_file: SimpleNamespace(id="T1", title="Do work"))
+
+        def fake_run_orchestrator(plan_file, step_mode=False, no_deslop=False, model=None):
+            captured.update(
+                plan_file=plan_file,
+                step_mode=step_mode,
+                no_deslop=no_deslop,
+                model=model,
+            )
+            return 0
+
+        monkeypatch.setattr("cli.run_orchestrator", fake_run_orchestrator)
+
+        result = cmd_run(SimpleNamespace(plan_file="PLAN-test.md", step=False, no_deslop=False, model="cli-model"))
+
+        assert result == 0
+        assert checked == ["cli-model"]
+        assert captured == {
+            "plan_file": "PLAN-test.md",
+            "step_mode": False,
+            "no_deslop": False,
+            "model": "cli-model",
+        }
+
+    def test_run_uses_env_model_when_no_argument(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        Path("PLAN-test.md").write_text("# Plan\n- [ ] T1: Do work\n")
+        checked = []
+        captured = {}
+        monkeypatch.setenv("DVX_MODEL", "env-model")
+        monkeypatch.setattr("cli._check_selected_model", lambda model: checked.append(model) or (True, ""))
+        monkeypatch.setattr("cli.sync_plan_state", lambda plan_file: {"synced": 0, "added": 0})
+        monkeypatch.setattr("cli.get_plan_summary", lambda plan_file: {"total": 1, "done": 0, "in_progress": 0, "pending": 1})
+        monkeypatch.setattr("cli.get_next_pending_task", lambda plan_file: SimpleNamespace(id="T1", title="Do work"))
+        def fake_run_orchestrator(plan_file, step_mode=False, no_deslop=False, model=None):
+            captured["model"] = model
+            return 0
+
+        monkeypatch.setattr("cli.run_orchestrator", fake_run_orchestrator)
+
+        result = cmd_run(SimpleNamespace(plan_file="PLAN-test.md", step=False, no_deslop=False, model=None))
+
+        assert result == 0
+        assert checked == ["env-model"]
+        assert captured["model"] == "env-model"
+
+
 class TestWatchCommand:
     """Tests for the goal-based watch command."""
 
@@ -305,28 +378,61 @@ class TestWatchCommand:
         """Clean up temp directory."""
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    def test_watch_passes_current_branch_to_goal_loop(self, monkeypatch):
+    def test_watch_passes_current_branch_and_model_to_goal_loop(self, monkeypatch):
         """Should note the branch watch was started on and hand it to the loop."""
         monkeypatch.chdir(self.temp_dir)
         calls = []
 
-        def fake_run_goal_watch(start_branch, goals_dir, poll_interval, once):
-            calls.append((start_branch, goals_dir, poll_interval, once))
+        monkeypatch.setattr("cli._check_selected_model", lambda model: (True, ""))
+
+        def fake_run_goal_watch(start_branch, goals_dir, poll_interval, once, model=None):
+            calls.append((start_branch, goals_dir, poll_interval, once, model))
             return 0
 
         monkeypatch.setattr("cli.run_goal_watch", fake_run_goal_watch)
 
-        result = cmd_watch(SimpleNamespace(goals="./goals", poll_interval=2.0, once=True))
+        result = cmd_watch(SimpleNamespace(goals="./goals", poll_interval=2.0, once=True, model=None))
 
         assert result == 0
-        assert calls == [("work", "./goals", 2.0, True)]
+        assert calls == [("work", "./goals", 2.0, True, DEFAULT_CLAUDE_MODEL)]
+
+    def test_watch_model_argument_overrides_env(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        calls = []
+        checked = []
+        monkeypatch.setenv("DVX_MODEL", "env-model")
+
+        def fake_check(model):
+            checked.append(model)
+            return True, ""
+
+        def fake_run_goal_watch(start_branch, goals_dir, poll_interval, once, model=None):
+            calls.append(model)
+            return 0
+
+        monkeypatch.setattr("cli._check_selected_model", fake_check)
+        monkeypatch.setattr("cli.run_goal_watch", fake_run_goal_watch)
+
+        result = cmd_watch(SimpleNamespace(goals="./goals", poll_interval=2.0, once=True, model="cli-model"))
+
+        assert result == 0
+        assert checked == ["cli-model"]
+        assert calls == ["cli-model"]
+
+    def test_watch_fails_when_selected_model_is_unavailable(self, monkeypatch):
+        monkeypatch.chdir(self.temp_dir)
+        monkeypatch.setattr("cli._check_selected_model", lambda model: (False, "model unavailable"))
+
+        result = cmd_watch(SimpleNamespace(goals="./goals", poll_interval=2.0, once=True, model="bad-model"))
+
+        assert result == 1
 
     def test_watch_fails_outside_git_repo(self, monkeypatch, tmp_path):
         """Should refuse to watch when not in a git repository."""
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent))
 
-        result = cmd_watch(SimpleNamespace(goals="./goals", poll_interval=2.0, once=True))
+        result = cmd_watch(SimpleNamespace(goals="./goals", poll_interval=2.0, once=True, model=None))
 
         assert result == 1
 
@@ -337,9 +443,10 @@ class TestWatchCommand:
         def interrupted(*args, **kwargs):
             raise KeyboardInterrupt
 
+        monkeypatch.setattr("cli._check_selected_model", lambda model: (True, ""))
         monkeypatch.setattr("cli.run_goal_watch", interrupted)
 
-        result = cmd_watch(SimpleNamespace(goals="./goals", poll_interval=2.0, once=False))
+        result = cmd_watch(SimpleNamespace(goals="./goals", poll_interval=2.0, once=False, model=None))
 
         assert result == 130
 

@@ -12,9 +12,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 import goals as goals_module
-from claude_session import SessionResult
+from claude_session import DEFAULT_CLAUDE_MODEL, SessionResult
 from goals import (
-    GOAL_MODEL,
     ITEM_TYPE_GOAL,
     ITEM_TYPE_RUN,
     MERGE_FILE_NAME,
@@ -610,7 +609,7 @@ class TestProcessGoal(GitRepoTestCase):
         assert state.current["status"] == STATUS_BRANCHED
         assert (Path(self.temp_dir) / "goals" / "TODO-unsafe.md").exists()
 
-    def test_run_item_with_orchestrator_forces_fable_model(self, monkeypatch):
+    def test_run_item_with_orchestrator_uses_default_model(self, monkeypatch):
         captured = {}
 
         def fake_run_orchestrator(plan_file, model=None):
@@ -625,7 +624,7 @@ class TestProcessGoal(GitRepoTestCase):
         assert result.success
         assert captured == {
             "plan_file": "PLAN-do-work.md",
-            "model": GOAL_MODEL,
+            "model": DEFAULT_CLAUDE_MODEL,
         }
 
     def test_merge_pushes_watch_branch_to_origin(self, monkeypatch, tmp_path):
