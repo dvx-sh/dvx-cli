@@ -1,7 +1,7 @@
 """Tests for the root install.sh installer modes.
 
 Each test runs install.sh against an isolated HOME (tmp_path) and a minimal
-fake checkout whose dvx/bin/setup is a stub that records its arguments in
+fake checkout whose bin/setup is a stub that records its arguments in
 $HOME/.dvx/setup-ran — the real setup (venv + pip install) is never run.
 """
 
@@ -13,23 +13,27 @@ from pathlib import Path
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[1]
 INSTALL_SH = REPO_ROOT / "install.sh"
 
 
 def write_payload(root: Path) -> None:
-    """Create a minimal fake dvx/ payload under root."""
-    (root / "dvx" / "bin").mkdir(parents=True)
-    setup = root / "dvx" / "bin" / "setup"
+    """Create a minimal fake flat project payload under root."""
+    (root / "bin").mkdir(parents=True)
+    setup = root / "bin" / "setup"
     setup.write_text('#!/bin/bash\nmkdir -p "$HOME/.dvx"\necho "$@" > "$HOME/.dvx/setup-ran"\n')
     setup.chmod(0o755)
-    dvx_bin = root / "dvx" / "bin" / "dvx"
+    dvx_bin = root / "bin" / "dvx"
     dvx_bin.write_text("#!/bin/bash\n")
     dvx_bin.chmod(0o755)
-    (root / "dvx" / "src" / "skills").mkdir(parents=True)
-    (root / "dvx" / "src" / "cli.py").write_text("")
-    (root / "dvx" / "src" / "skills" / "demo.md").write_text("# demo skill\n")
-    (root / "dvx" / "pyproject.toml").write_text('[project]\nname = "dvx"\n')
+    (root / "src" / "skills").mkdir(parents=True)
+    (root / "tests").mkdir()
+    (root / "plans").mkdir()
+    (root / "src" / "cli.py").write_text("")
+    (root / "src" / "skills" / "demo.md").write_text("# demo skill\n")
+    (root / "pyproject.toml").write_text('[project]\nname = "dvx"\n')
+    (root / "tasks.py").write_text("")
+    (root / "uv.lock").write_text("")
 
 
 @pytest.fixture
@@ -42,7 +46,7 @@ def home(tmp_path):
 
 @pytest.fixture
 def fake_checkout(tmp_path):
-    """Fake repo checkout containing install.sh and a stub dvx/ payload."""
+    """Fake repo checkout containing install.sh and a stub flat payload."""
     checkout = tmp_path / "checkout"
     checkout.mkdir()
     write_payload(checkout)

@@ -28,7 +28,7 @@ Place `GOAL.md.example` into `~/.dvx/` alongside the installed source tree and b
 
 ### Update install.sh
 
-Add a copy step in the "Copy files" section of `install.sh`, after `cp -r "$DVX_PAYLOAD/"* "$DVX_HOME/"`. Since `GOAL.md.example` lives at the repo root (not inside `dvx/`), it needs an explicit copy:
+Add a copy step in the "Copy files" section of `install.sh`, after the root payload files are copied. Since `GOAL.md.example` lives at the repo root, it needs an explicit copy:
 
 ```bash
 # Copy the goal template so AI agents can reference it without curl
@@ -73,7 +73,7 @@ Read ~/.dvx/GOAL.md.example, then create a well-scoped GOAL*.md file in .dvx/tod
 
 ## Implementation Tasks
 
-- [ ] Add `cp "${SRC_ROOT}/GOAL.md.example" "$DVX_HOME/GOAL.md.example"` to `install.sh` in the "Copy files" section (after the `cp -r` of the dvx payload, before the chmod step)
+- [ ] Add `cp "${SRC_ROOT}/GOAL.md.example" "$DVX_HOME/GOAL.md.example"` to `install.sh` in the "Copy files" section before the chmod step
 - [ ] In `README.md`, remove the "Download the goal template" step (step 2) from the install prompt and renumber step 3 to step 2
 - [ ] In `README.md`, update the "Queue work" section to reference `~/.dvx/GOAL.md.example` instead of `GOAL.md.example`
 - [ ] In `README.md`, update any other references to `GOAL.md.example` (without a path) to `~/.dvx/GOAL.md.example`

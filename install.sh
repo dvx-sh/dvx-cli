@@ -7,7 +7,7 @@
 #                                             (downloads the repo, then installs)
 #
 # Flags:
-#   --local     Require a local checkout (this script next to a dvx/ payload);
+#   --local     Require a local checkout (this script next to pyproject.toml);
 #               errors out instead of falling back to download.
 #   --remote    Always download the repo tarball and install from it, even
 #               when run from a checkout.
@@ -35,7 +35,7 @@ Installs dvx to ~/.dvx and its skills to ~/.claude/commands/dvx.
 
 Modes (default: auto-detect):
   --local     Install from the checkout containing this script. Errors if
-              the script is not next to a dvx/ payload; never downloads.
+              the script is not next to the project root; never downloads.
   --remote    Download the repo tarball and install from it, even when run
               from a checkout.
   (no flag)   Use the local checkout when available, otherwise download.
@@ -93,16 +93,19 @@ trap cleanup EXIT
 
 # --- Detect install source ---------------------------------------------------
 # When run from a local clone, this script is a real file whose directory
-# contains the dvx/ payload. When piped from curl, $BASH_SOURCE is "bash"
+# contains the project root. When piped from curl, $BASH_SOURCE is "bash"
 # (not a file), so we fall back to downloading the repo.
 SOURCE="${BASH_SOURCE[0]:-$0}"
 LOCAL_ROOT=""
-if [ -f "$SOURCE" ] && [ -d "$(cd "$(dirname "$SOURCE")" && pwd)/dvx" ]; then
-    LOCAL_ROOT="$(cd "$(dirname "$SOURCE")" && pwd)"
+if [ -f "$SOURCE" ]; then
+    SOURCE_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
+    if [ -f "$SOURCE_DIR/pyproject.toml" ]; then
+        LOCAL_ROOT="$SOURCE_DIR"
+    fi
 fi
 
 if [ "$MODE" = "local" ] && [ -z "$LOCAL_ROOT" ]; then
-    echo "Error: --local requires running install.sh from a checkout containing a dvx/ payload." >&2
+    echo "Error: --local requires running install.sh from a checkout root containing pyproject.toml." >&2
     exit 1
 fi
 if [ "$MODE" = "auto" ]; then
@@ -130,20 +133,30 @@ else
     SRC_ROOT="${TMP_DIR}/dvx-cli-${DVX_BRANCH}"
 fi
 
-DVX_PAYLOAD="${SRC_ROOT}/dvx"
-if [ ! -d "$DVX_PAYLOAD" ]; then
-    echo "Error: could not find dvx payload at ${DVX_PAYLOAD}" >&2
+DVX_PAYLOAD="$SRC_ROOT"
+if [ ! -f "$DVX_PAYLOAD/pyproject.toml" ] || [ ! -d "$DVX_PAYLOAD/src" ] || [ ! -d "$DVX_PAYLOAD/bin" ]; then
+    echo "Error: could not find dvx project payload at ${DVX_PAYLOAD}" >&2
     exit 1
 fi
 
 # --- Copy files --------------------------------------------------------------
 echo "Installing dvx to ${DVX_HOME}..."
 mkdir -p "$DVX_HOME"
-# Remove the old source tree first so files deleted from the package
-# (modules, skills) don't linger across upgrades. The venv lives at
-# ${DVX_HOME}/.venv and is untouched.
-rm -rf "$DVX_HOME/src"
-cp -r "$DVX_PAYLOAD/"* "$DVX_HOME/"
+# Remove installed package directories first so files deleted from the package
+# don't linger across upgrades. The venv lives at ${DVX_HOME}/.venv and is
+# untouched.
+for dir in bin src tests plans; do
+    rm -rf "$DVX_HOME/$dir"
+    if [ -d "$DVX_PAYLOAD/$dir" ]; then
+        cp -r "$DVX_PAYLOAD/$dir" "$DVX_HOME/"
+    fi
+done
+
+for file in pyproject.toml tasks.py uv.lock; do
+    if [ -f "$DVX_PAYLOAD/$file" ]; then
+        cp "$DVX_PAYLOAD/$file" "$DVX_HOME/"
+    fi
+done
 
 # Make scripts executable
 chmod +x "$DVX_HOME/bin/"*
