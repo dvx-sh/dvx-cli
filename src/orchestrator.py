@@ -1029,6 +1029,7 @@ def _run_deslop_pass(plan_file: str, state: State) -> None:
     print()
     print("Running deslop pass on session-changed files...")
 
+    state = load_state(plan_file) or state
     changed = load_changed_files_manifest(plan_file)
     if not changed:
         base_head = load_session_base_head(plan_file) or "HEAD"
@@ -1486,6 +1487,19 @@ def _run_finalization(plan_file: str, state: State, no_deslop: bool = False) -> 
             break
 
         if result["has_suggestions"]:
+            _record_finalize_verdict(plan_file, "SUGGESTIONS", iteration)
+            if iteration >= max_finalizer_iterations:
+                print(
+                    "  Finalizer still has suggestions after retry limit; "
+                    "proceeding because suggestions are optional."
+                )
+                logger.info(
+                    "Finalizer suggestions remained after %s attempts; "
+                    "proceeding without blocking.",
+                    max_finalizer_iterations,
+                )
+                break
+
             print("  Finalizer has suggestions - implementing improvements...")
             logger.info("Finalizer found suggestions to address")
 
@@ -1533,6 +1547,7 @@ def _run_finalization(plan_file: str, state: State, no_deslop: bool = False) -> 
         if result["has_issues"]:
             print("  Finalizer found issues - running fixes...")
             logger.info(f"Finalizer found {len(result['issues'])} issues")
+            _record_finalize_verdict(plan_file, "ISSUES", iteration)
 
             # Run implementer to fix the issues
             fix_result = run_finalizer_fix(result["output"], plan_file)
@@ -1573,7 +1588,7 @@ def _run_finalization(plan_file: str, state: State, no_deslop: bool = False) -> 
             "The finalizer and implementer could not converge on an approved state.",
         )
 
-    # === DESLOP PASS (post-APPROVED only) ===
+    # === DESLOP PASS (post-finalizer acceptance only) ===
     if no_deslop:
         logger.info("Skipping deslop pass (not opted in via --deslop)")
     else:
