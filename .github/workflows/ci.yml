@@ -22,17 +22,14 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
-        working-directory: ./dvx
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
       - name: Run linting
-        working-directory: ./dvx
         run: |
           ruff check .
 
       - name: Run tests
-        working-directory: ./dvx
         run: |
           pytest -v
