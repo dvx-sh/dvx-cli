@@ -487,3 +487,89 @@ The plan file has been updated to mark this task as done.
         assert not is_already_complete("Task implemented successfully.")
         assert not is_already_complete("[APPROVED] Looks good.")
         assert not is_already_complete("Already done with implementation.")
+
+
+class TestFinalizationLoop:
+    """Tests for finalizer retry behavior."""
+
+    def test_repeated_suggestions_do_not_block_after_retry_limit(self, monkeypatch):
+        """Optional suggestions should not become a human-intervention block."""
+        plan_file = "PLAN-finalizer.md"
+        state = orchestrator_module.State(plan_file=plan_file)
+        finalizer_calls = []
+        polish_calls = []
+        committed = []
+        verdicts = []
+
+        monkeypatch.setattr(
+            orchestrator_module,
+            "get_plan_summary",
+            lambda _plan_file: {"total": 0, "pending": 0, "in_progress": 0},
+        )
+        monkeypatch.setattr(orchestrator_module, "update_phase", lambda *_args, **_kwargs: state)
+        monkeypatch.setattr(orchestrator_module, "_run_deslop_pass", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(orchestrator_module, "cleanup_plan", lambda _plan_file: True)
+        monkeypatch.setattr(orchestrator_module, "log_decisions_from_output", lambda *_args, **_kwargs: None)
+
+        def fake_record(_plan_file, verdict, iteration):
+            verdicts.append((verdict, iteration))
+
+        def fake_finalizer(_plan_file):
+            finalizer_calls.append(_plan_file)
+            return SessionResult(
+                output="[SUGGESTIONS]\n\n## Deferred Work\nAlready captured in FIX files.",
+                session_id="finalizer-session",
+                success=True,
+            )
+
+        def fake_polish_fix(suggestions, _plan_file):
+            polish_calls.append(suggestions)
+            return SessionResult(output="Working tree clean; nothing to do.", session_id="fix-session", success=True)
+
+        def fake_polish_commit():
+            committed.append(True)
+            return SessionResult(output="Nothing to commit.", session_id="commit-session", success=True)
+
+        def fail_blocked(*_args, **_kwargs):
+            raise AssertionError("suggestions retry cap should not block")
+
+        monkeypatch.setattr(orchestrator_module, "_record_finalize_verdict", fake_record)
+        monkeypatch.setattr(orchestrator_module, "run_finalizer", fake_finalizer)
+        monkeypatch.setattr(orchestrator_module, "run_polish_fix", fake_polish_fix)
+        monkeypatch.setattr(orchestrator_module, "run_polish_commit", fake_polish_commit)
+        monkeypatch.setattr(orchestrator_module, "handle_blocked", fail_blocked)
+
+        assert orchestrator_module._run_finalization(plan_file, state) == 0
+
+        assert len(finalizer_calls) == 3
+        assert len(polish_calls) == 2
+        assert len(committed) == 2
+        assert verdicts == [("SUGGESTIONS", 1), ("SUGGESTIONS", 2), ("SUGGESTIONS", 3)]
+
+    def test_deslop_preserves_recorded_finalize_verdict(self, monkeypatch, tmp_path):
+        """Deslop state saves should not restore a stale pre-finalizer verdict."""
+        plan_file = "PLAN-finalizer.md"
+        monkeypatch.chdir(tmp_path)
+
+        stale_state = orchestrator_module.State(
+            plan_file=plan_file,
+            finalize_verdict="BLOCKED",
+            finalize_iterations=3,
+        )
+        current_state = orchestrator_module.State(
+            plan_file=plan_file,
+            finalize_verdict="APPROVED",
+            finalize_iterations=1,
+        )
+        orchestrator_module.save_state(current_state)
+
+        monkeypatch.setattr(orchestrator_module, "load_changed_files_manifest", lambda _plan_file: [])
+        monkeypatch.setattr(orchestrator_module, "load_session_base_head", lambda _plan_file: "")
+        monkeypatch.setattr(orchestrator_module, "compute_changed_files", lambda **_kwargs: [])
+
+        orchestrator_module._run_deslop_pass(plan_file, stale_state)
+
+        saved = orchestrator_module.load_state(plan_file)
+        assert saved.finalize_verdict == "APPROVED"
+        assert saved.finalize_iterations == 1
+        assert saved.deslop_run is True

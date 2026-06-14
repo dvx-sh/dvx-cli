@@ -203,11 +203,12 @@ The orchestrator will run additional implement-review cycles to address these is
 ## Categorization Guide
 
 - **[APPROVED]** — clean, ready for merge as-is
-- **[SUGGESTIONS]** — optional improvements to apply before merge (quick wins and deferred FIX files). Use when the code works correctly but could be improved.
+- **[SUGGESTIONS]** — optional improvements to apply before merge (quick wins and deferred FIX files). Use only for fresh, actionable optional work that has not already been applied or captured.
 - **[ISSUES]** — bugs, test failures, or problems that block merge. Use when something is actually broken or wrong.
 - **[CRITICAL]** — unrecoverable issue (broken build, destroyed data, security vulnerability shipped). Emit only when the finalize loop cannot recover without human intervention.
 
 Be conservative: when in doubt between [SUGGESTIONS] and [ISSUES], prefer [SUGGESTIONS]. Quick wins should be low-risk, obvious improvements. Deferred work goes to FIX files.
+If all blocking issues are resolved and any remaining deferred work is already captured in FIX files, output [APPROVED] instead of repeating [SUGGESTIONS].
 
 ## Guidelines
 
